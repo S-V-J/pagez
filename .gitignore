@@ -1,37 +1,86 @@
+# ==============================================================================
+# Pagez root .gitignore
+# SYSTEMIC ROLE:
+#   Prevents dependencies, build outputs, local runtime state, secrets, logs,
+#   caches, test artifacts, IDE files, OS files, and infrastructure credentials
+#   from being committed into the Pagez monorepo.
+# ==============================================================================
+
 # Dependencies
 node_modules/
 .pnpm-store/
+.pnpm/
 
 # Build outputs
 .next/
 out/
 dist/
 build/
+frontend/.next/
+frontend/out/
+backend/dist/
 
-# Environment
+# Environment files
 .env
 .env.local
 .env.*.local
+.env.development.local
+.env.test.local
+.env.production.local
 
 # Logs
 *.log
 npm-debug.log*
 pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+logs/
 
-# IDE
+# Local runtime state
+run/
+*.pid
+*.seed
+*.pid.lock
+
+# IDE and editor files
 .idea/
 .vscode/
 *.swp
 *.swo
 *~
 
-# OS
+# Operating system files
 .DS_Store
 Thumbs.db
 
-# Docker / Compose
+# Docker and local compose overrides
 docker-compose.override.yml
 
-# Misc
+# Testing and coverage
 coverage/
+.nyc_output/
+playwright-report/
+test-results/
+
+# Caches and temporary files
+.cache/
+.tmp/
+tmp/
+*.tsbuildinfo
+.eslintcache
+.stylelintcache
+
+# Monorepo and build tooling caches
 .turbo/
+.vercel/
+
+# Cloudflare Tunnel and local infrastructure secrets
+.cloudflared/
+*.pem
+*.key
+secrets/
+vault/
+
+# Miscellaneous
+*.tgz
+*.tar.gz

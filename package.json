@@ -1,0 +1,21 @@
+{
+  "name": "pagez",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pagez multi-tenant influencer PWA platform monorepo.",
+  "packageManager": "pnpm@11.23.0",
+  "engines": {
+    "node": ">=22.0.0 <23.0.0",
+    "pnpm": ">=11.0.0 <12.0.0"
+  },
+  "scripts": {
+    "dev": "pnpm -r --parallel --if-present dev",
+    "dev:frontend": "pnpm --filter frontend --if-present dev",
+    "dev:backend": "pnpm --filter backend --if-present start:dev",
+    "build": "pnpm -r --if-present build",
+    "lint": "pnpm -r --if-present lint",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "pnpm -r --if-present test",
+    "verify": "pnpm lint && pnpm typecheck && pnpm test && pnpm build"
+  }
+}

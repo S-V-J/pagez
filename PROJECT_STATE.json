@@ -1,0 +1,33 @@
+{
+  "project": "pagez",
+  "repository": "git@github.com:S-V-J/pagez.git",
+  "sourceOfTruth": "PRD.md",
+  "currentPhase": "P01",
+  "phases": [
+    { "id": "P00", "title": "Repository foundation", "status": "done" },
+    { "id": "P01", "title": "Design system and UI kit", "status": "pending" },
+    { "id": "P02", "title": "Multi-tenant application shell", "status": "pending" },
+    { "id": "P03", "title": "PostgreSQL baseline and RLS", "status": "pending" },
+    { "id": "P04", "title": "Authentication, MFA, RBAC", "status": "pending" },
+    { "id": "P05", "title": "PWA shell, manifest, service worker, updates", "status": "pending" },
+    { "id": "P06", "title": "Dynamic portfolio site builder", "status": "pending" },
+    { "id": "P07", "title": "Social link aggregator", "status": "pending" },
+    { "id": "P08", "title": "Service catalog", "status": "pending" },
+    { "id": "P09", "title": "Appointment booking engine", "status": "pending" },
+    { "id": "P10", "title": "Payment orchestration", "status": "pending" },
+    { "id": "P11", "title": "Subscription billing and tier enforcement", "status": "pending" },
+    { "id": "P12", "title": "Open-source ad engine integration", "status": "pending" },
+    { "id": "P13", "title": "Web analytics integration", "status": "pending" },
+    { "id": "P14", "title": "Social media analytics connectors", "status": "pending" },
+    { "id": "P15", "title": "Unified analytics dashboard", "status": "pending" },
+    { "id": "P16", "title": "Superadmin control plane and forced releases", "status": "pending" },
+    { "id": "P17", "title": "WSL pagez command system", "status": "pending" },
+    { "id": "P18", "title": "Cloudflare Tunnel development harness", "status": "pending" },
+    { "id": "P19", "title": "Observability and audit telemetry", "status": "pending" },
+    { "id": "P20", "title": "Security hardening and threat validation", "status": "pending" },
+    { "id": "P21", "title": "End-to-end QA and performance gates", "status": "pending" },
+    { "id": "P22", "title": "Production deployment topology", "status": "pending" },
+    { "id": "P23", "title": "Launch runbook, backup, restore, disaster recovery", "status": "pending" },
+    { "id": "P24", "title": "Final release audit and documentation completion", "status": "pending" }
+  ]
+}

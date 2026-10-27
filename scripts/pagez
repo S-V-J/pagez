@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+#
+# scripts/pagez — Pagez local operations entrypoint
+#
+# P00 foundation stub. The production-quality CLI (start, stop, restart,
+# status, logs, enable, disable, doctor, tunnel) is owned by phase P17
+# (WSL pagez command system, PRD §14.1 and phase prompt P17). Until P17 is
+# done, every operational subcommand fails with an explicit phase-dependency
+# message. `help` works in this phase.
+
+set -euo pipefail
+
+SCRIPT_NAME="pagez"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+readonly PHASE_OWNER="P17 (WSL pagez command system — PRD §14.1, phase prompt P17)"
+
+fail_phase_dependency() {
+  local cmd="$1"
+  echo "${SCRIPT_NAME}: ${cmd} is not yet implemented — owned by ${PHASE_OWNER}" >&2
+  echo "Run '${SCRIPT_NAME} help' for usage." >&2
+  exit 2
+}
+
+cmd_help() {
+  cat <<EOF
+Usage: pagez <subcommand>
+
+Pagez local operations entrypoint (P00 foundation stub).
+
+Subcommands:
+  help       Show this help message
+  doctor     Validate environment (WSL, Node, pnpm, Docker, ports, Git remote, TLS, service health)
+  start      Start required services in background and wait for health checks
+  stop       Gracefully stop services; preserve logs
+  restart    Stop then start
+  status     Show service state, ports, health, version, tunnel state
+  logs       Stream logs (optional service filter, --since)
+  enable     Enable autostart (systemd user services; PM2 fallback)
+  disable    Disable autostart
+  tunnel     Start or inspect Cloudflare Tunnel dev harness
+
+Operational subcommands (doctor, start, stop, restart, status, logs, enable,
+disable, tunnel) are implemented in phase P17 and fail with a
+phase-dependency message until P17 is done.
+EOF
+}
+
+cmd_doctor() { fail_phase_dependency doctor; }
+cmd_start() { fail_phase_dependency start; }
+cmd_stop() { fail_phase_dependency stop; }
+cmd_restart() { fail_phase_dependency restart; }
+cmd_status() { fail_phase_dependency status; }
+cmd_logs() { fail_phase_dependency logs; }
+cmd_enable() { fail_phase_dependency enable; }
+cmd_disable() { fail_phase_dependency disable; }
+cmd_tunnel() { fail_phase_dependency tunnel; }
+
+main() {
+  if [[ $# -lt 1 ]]; then
+    cmd_help
+    exit 0
+  fi
+
+  local cmd="$1"; shift
+  case "$cmd" in
+    help|--help|-h)
+      cmd_help
+      ;;
+    doctor)
+      cmd_doctor "$@"
+      ;;
+    start)
+      cmd_start "$@"
+      ;;
+    stop)
+      cmd_stop "$@"
+      ;;
+    restart)
+      cmd_restart "$@"
+      ;;
+    status)
+      cmd_status "$@"
+      ;;
+    logs)
+      cmd_logs "$@"
+      ;;
+    enable)
+      cmd_enable "$@"
+      ;;
+    disable)
+      cmd_disable "$@"
+      ;;
+    tunnel)
+      cmd_tunnel "$@"
+      ;;
+    *)
+      echo "${SCRIPT_NAME}: unknown subcommand: ${cmd}" >&2
+      echo "Run '${SCRIPT_NAME} help' for usage." >&2
+      exit 2
+      ;;
+  esac
+}
+
+main "$@"

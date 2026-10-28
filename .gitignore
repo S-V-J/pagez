@@ -88,3 +88,6 @@ vault/
 # Nested pnpm workspace configs are forbidden in the Pagez monorepo.
 frontend/pnpm-workspace.yaml
 backend/pnpm-workspace.yaml
+
+# Nested backend gitignore files are forbidden; root .gitignore is authoritative.
+backend/.gitignore

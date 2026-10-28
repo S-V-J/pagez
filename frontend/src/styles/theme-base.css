@@ -1,0 +1,211 @@
+/*
+FILE: frontend/src/styles/theme-base.css
+
+SYSTEMIC ROLE:
+  Maps raw Pagez design tokens into Tailwind CSS v4 theme variables and defines
+  baseline element styles.
+
+  This file is the bridge between:
+  - raw CSS custom properties in design-tokens.css
+  - Tailwind utility classes such as bg-background, text-muted-foreground,
+    rounded-lg, shadow-md, font-sans, and ease-out
+
+  It also defines the dark variant selector strategy.
+
+DARK MODE STRATEGY:
+  Pagez uses class/data-attribute driven dark mode:
+    .dark
+    [data-theme="dark"]
+
+  The no-flash initialization script in frontend/src/design-system/theme.ts
+  sets these attributes before React hydration.
+*/
+
+@custom-variant dark (&:where(.dark, .dark *, [data-theme="dark"], [data-theme="dark"] *));
+
+@theme inline {
+  /*
+    Color token mapping.
+
+    Tailwind v4 generates utilities from --color-* theme variables.
+    Example:
+      --color-primary: var(--pagez-primary);
+      produces:
+        bg-primary
+        text-primary
+        border-primary
+        ring-primary
+  */
+  --color-background: var(--pagez-background);
+  --color-foreground: var(--pagez-foreground);
+
+  --color-card: var(--pagez-card);
+  --color-card-foreground: var(--pagez-card-foreground);
+
+  --color-popover: var(--pagez-popover);
+  --color-popover-foreground: var(--pagez-popover-foreground);
+
+  --color-primary: var(--pagez-primary);
+  --color-primary-foreground: var(--pagez-primary-foreground);
+
+  --color-secondary: var(--pagez-secondary);
+  --color-secondary-foreground: var(--pagez-secondary-foreground);
+
+  --color-muted: var(--pagez-muted);
+  --color-muted-foreground: var(--pagez-muted-foreground);
+
+  --color-accent: var(--pagez-accent);
+  --color-accent-foreground: var(--pagez-accent-foreground);
+
+  --color-destructive: var(--pagez-destructive);
+  --color-destructive-foreground: var(--pagez-destructive-foreground);
+
+  --color-success: var(--pagez-success);
+  --color-success-foreground: var(--pagez-success-foreground);
+
+  --color-warning: var(--pagez-warning);
+  --color-warning-foreground: var(--pagez-warning-foreground);
+
+  --color-info: var(--pagez-info);
+  --color-info-foreground: var(--pagez-info-foreground);
+
+  --color-border: var(--pagez-border);
+  --color-input: var(--pagez-input);
+  --color-ring: var(--pagez-ring);
+
+  --color-overlay: var(--pagez-overlay);
+  --color-scrim: var(--pagez-scrim);
+
+  --color-chart-1: var(--pagez-chart-1);
+  --color-chart-2: var(--pagez-chart-2);
+  --color-chart-3: var(--pagez-chart-3);
+  --color-chart-4: var(--pagez-chart-4);
+  --color-chart-5: var(--pagez-chart-5);
+
+  /*
+    Font token mapping.
+
+    Tailwind v4 generates font-family utilities from --font-*.
+    Example:
+      font-sans
+      font-mono
+      font-display
+  */
+  --font-sans: var(--pagez-font-sans);
+  --font-mono: var(--pagez-font-mono);
+  --font-display: var(--pagez-font-display);
+
+  /*
+    Spacing token mapping.
+
+    Tailwind v4 uses --spacing as the base spacing unit.
+  */
+  --spacing: var(--pagez-spacing);
+
+  /*
+    Radius token mapping.
+
+    Tailwind v4 generates rounded-* utilities from --radius-*.
+  */
+  --radius-none: var(--pagez-radius-none);
+  --radius-sm: var(--pagez-radius-sm);
+  --radius-md: var(--pagez-radius-md);
+  --radius-lg: var(--pagez-radius-lg);
+  --radius-xl: var(--pagez-radius-xl);
+  --radius-2xl: var(--pagez-radius-2xl);
+  --radius-3xl: var(--pagez-radius-3xl);
+  --radius-full: var(--pagez-radius-full);
+
+  /*
+    Shadow token mapping.
+
+    Tailwind v4 generates shadow-* utilities from --shadow-*.
+  */
+  --shadow-2xs: var(--pagez-shadow-2xs);
+  --shadow-xs: var(--pagez-shadow-xs);
+  --shadow-sm: var(--pagez-shadow-sm);
+  --shadow-md: var(--pagez-shadow-md);
+  --shadow-lg: var(--pagez-shadow-lg);
+  --shadow-xl: var(--pagez-shadow-xl);
+  --shadow-2xl: var(--pagez-shadow-2xl);
+
+  /*
+    Breakpoint token mapping.
+
+    Tailwind v4 generates responsive prefixes from --breakpoint-*.
+  */
+  --breakpoint-sm: var(--pagez-breakpoint-sm);
+  --breakpoint-md: var(--pagez-breakpoint-md);
+  --breakpoint-lg: var(--pagez-breakpoint-lg);
+  --breakpoint-xl: var(--pagez-breakpoint-xl);
+  --breakpoint-2xl: var(--pagez-breakpoint-2xl);
+
+  /*
+    Easing token mapping.
+
+    Tailwind v4 generates easing utilities from --ease-*.
+  */
+  --ease-linear: var(--pagez-ease-linear);
+  --ease-in: var(--pagez-ease-in);
+  --ease-out: var(--pagez-ease-out);
+  --ease-in-out: var(--pagez-ease-in-out);
+}
+
+@layer base {
+  /*
+    Baseline reset and element defaults.
+
+    These rules are intentionally minimal. Component-specific styling belongs
+    in P01.5, not here.
+  */
+
+  *,
+  ::before,
+  ::after {
+    border-color: var(--pagez-border);
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-rendering: optimizeLegibility;
+    scrollbar-gutter: stable;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background-color: var(--pagez-background);
+    color: var(--pagez-foreground);
+    font-family: var(--pagez-font-sans);
+    font-synthesis-weight: none;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  ::selection {
+    background-color: var(--pagez-primary);
+    color: var(--pagez-primary-foreground);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--pagez-ring);
+    outline-offset: 2px;
+  }
+
+  /*
+    Reduced motion support.
+
+    This is mandatory for accessible dashboard and public portfolio surfaces.
+    It does not disable functionality; it only reduces non-essential motion.
+  */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    ::before,
+    ::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}

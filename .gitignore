@@ -91,3 +91,23 @@ backend/pnpm-workspace.yaml
 
 # Nested backend gitignore files are forbidden; root .gitignore is authoritative.
 backend/.gitignore
+
+# Python virtual environments and Python build/cache artifacts.
+# These are allowed to exist locally for maintainer convenience,
+# but they are not part of the Pagez TypeScript application source.
+venv/
+.venv/
+env/
+.env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/

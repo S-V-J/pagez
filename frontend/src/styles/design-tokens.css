@@ -1,0 +1,263 @@
+/*
+FILE: frontend/src/styles/design-tokens.css
+
+SYSTEMIC ROLE:
+  Defines the raw Pagez semantic design tokens as CSS custom properties.
+
+  This file intentionally contains primitive/semantic variables only.
+  It does not define Tailwind utility classes.
+  It does not define component styles.
+  It does not define tenant-specific branding values.
+
+  The variables in this file are consumed by:
+  - theme-base.css, which maps them into Tailwind v4 @theme tokens.
+  - theme-dark.css, which overrides them for dark mode.
+  - tenant-theme.css, which documents and supports tenant overrides.
+  - TypeScript design-system helpers, which describe the same token contract.
+
+TOKEN NAMING RULE:
+  - Raw Pagez tokens use the prefix --pagez-.
+  - Tenant override tokens use the prefix --tenant-.
+  - Tailwind theme variables are mapped in theme-base.css and should not be
+    edited directly by application code.
+
+TENANT OVERRIDE CONTRACT:
+  Any ancestor element may set --tenant-* variables.
+  Examples:
+    <html style="--tenant-primary: oklch(50% 0.2 264);">
+    <body class="tenant-theme-scope" style="--tenant-radius: 0.75rem;">
+    <div style="--tenant-font-sans: Inter, sans-serif;">
+
+  The raw tokens below use var(--tenant-*, fallback), so tenant variables
+  override the platform default without requiring component-level changes.
+*/
+
+:root {
+  /*
+    Core surface and text tokens.
+
+    These are the most frequently overridden tenant branding tokens.
+    They are intentionally expressed as OKLCH values for better perceptual
+    consistency across light and dark themes.
+  */
+  --pagez-background: var(--tenant-background, oklch(100% 0 0));
+  --pagez-foreground: var(--tenant-foreground, oklch(13% 0.02 260));
+
+  --pagez-card: var(--tenant-card, oklch(98% 0.005 260));
+  --pagez-card-foreground: var(--tenant-card-foreground, var(--pagez-foreground));
+
+  --pagez-popover: var(--tenant-popover, oklch(100% 0 0));
+  --pagez-popover-foreground: var(--tenant-popover-foreground, var(--pagez-foreground));
+
+  /*
+    Primary action tokens.
+
+    Primary is the main tenant-brandable color.
+    It is used for principal buttons, active states, links, and focus rings
+    when a tenant-specific accent is not more appropriate.
+  */
+  --pagez-primary: var(--tenant-primary, oklch(45% 0.2 264));
+  --pagez-primary-foreground: var(--tenant-primary-foreground, oklch(98% 0.01 264));
+
+  /*
+    Secondary and muted tokens.
+
+    Secondary is for lower-emphasis actions.
+    Muted is for subdued text and surfaces.
+  */
+  --pagez-secondary: var(--tenant-secondary, oklch(96% 0.01 264));
+  --pagez-secondary-foreground: var(--tenant-secondary-foreground, oklch(30% 0.05 264));
+
+  --pagez-muted: var(--tenant-muted, oklch(96% 0.01 264));
+  --pagez-muted-foreground: var(--tenant-muted-foreground, oklch(45% 0.03 264));
+
+  /*
+    Accent tokens.
+
+    Accent is used for highlights, selected states, badges, and decorative
+    emphasis. It is separate from primary so tenants can brand emphasis
+    without changing principal action color.
+  */
+  --pagez-accent: var(--tenant-accent, oklch(94% 0.03 264));
+  --pagez-accent-foreground: var(--tenant-accent-foreground, oklch(25% 0.05 264));
+
+  /*
+    Status tokens.
+
+    Destructive is for destructive actions and validation errors.
+    Success, warning, and info are for semantic feedback.
+  */
+  --pagez-destructive: var(--tenant-destructive, oklch(55% 0.22 25));
+  --pagez-destructive-foreground: var(--tenant-destructive-foreground, oklch(98% 0.01 25));
+
+  --pagez-success: var(--tenant-success, oklch(55% 0.15 150));
+  --pagez-success-foreground: var(--tenant-success-foreground, oklch(98% 0.01 150));
+
+  --pagez-warning: var(--tenant-warning, oklch(70% 0.16 80));
+  --pagez-warning-foreground: var(--tenant-warning-foreground, oklch(20% 0.04 80));
+
+  --pagez-info: var(--tenant-info, oklch(55% 0.15 230));
+  --pagez-info-foreground: var(--tenant-info-foreground, oklch(98% 0.01 230));
+
+  /*
+    Line, input, and focus tokens.
+
+    Border is used for separators and component outlines.
+    Input is used for form control borders.
+    Ring is used for focus-visible outlines and keyboard navigation.
+  */
+  --pagez-border: var(--tenant-border, oklch(90% 0.01 264));
+  --pagez-input: var(--tenant-input, oklch(90% 0.01 264));
+  --pagez-ring: var(--tenant-ring, oklch(55% 0.15 264));
+
+  /*
+    Overlay tokens.
+
+    Overlay is for modal backdrops.
+    Scrim is for subtle darkening layers.
+  */
+  --pagez-overlay: var(--tenant-overlay, oklch(0% 0 0 / 0.55));
+  --pagez-scrim: var(--tenant-scrim, oklch(0% 0 0 / 0.35));
+
+  /*
+    Chart tokens.
+
+    These are used by analytics dashboards, booking conversion charts,
+    ad performance charts, and social metric charts in later phases.
+  */
+  --pagez-chart-1: var(--tenant-chart-1, oklch(55% 0.18 264));
+  --pagez-chart-2: var(--tenant-chart-2, oklch(60% 0.16 150));
+  --pagez-chart-3: var(--tenant-chart-3, oklch(65% 0.16 80));
+  --pagez-chart-4: var(--tenant-chart-4, oklch(60% 0.18 25));
+  --pagez-chart-5: var(--tenant-chart-5, oklch(55% 0.15 320));
+
+  /*
+    Typography tokens.
+
+    --font-geist-sans and --font-geist-mono are injected by next/font in
+    frontend/src/app/layout.tsx.
+
+    Tenant font overrides are plain font-stack strings. They are validated by
+    frontend/src/design-system/tenant-theme.ts before being applied.
+  */
+  --pagez-font-sans: var(
+    --tenant-font-sans,
+    var(
+      --font-geist-sans,
+      ui-sans-serif,
+      system-ui,
+      -apple-system,
+      BlinkMacSystemFont,
+      "Segoe UI",
+      Roboto,
+      "Helvetica Neue",
+      Arial,
+      "Noto Sans",
+      sans-serif,
+      "Apple Color Emoji",
+      "Segoe UI Emoji",
+      "Segoe UI Symbol",
+      "Noto Color Emoji"
+    )
+  );
+
+  --pagez-font-mono: var(
+    --tenant-font-mono,
+    var(
+      --font-geist-mono,
+      ui-monospace,
+      SFMono-Regular,
+      Menlo,
+      Monaco,
+      Consolas,
+      "Liberation Mono",
+      "Courier New",
+      monospace
+    )
+  );
+
+  --pagez-font-display: var(--tenant-font-display, var(--pagez-font-sans));
+
+  /*
+    Spacing token.
+
+    Tailwind v4 uses --spacing as the base spacing multiplier.
+    The raw Pagez token is prefixed to avoid circular references.
+  */
+  --pagez-spacing: var(--tenant-spacing, 0.25rem);
+
+  /*
+    Radius tokens.
+
+    Tenant radius is treated as the medium/base radius.
+    Other radii are derived proportionally.
+  */
+  --pagez-radius-none: 0;
+  --pagez-radius-sm: calc(var(--tenant-radius, 0.5rem) * 0.5);
+  --pagez-radius-md: var(--tenant-radius, 0.5rem);
+  --pagez-radius-lg: calc(var(--tenant-radius, 0.5rem) * 1.5);
+  --pagez-radius-xl: calc(var(--tenant-radius, 0.5rem) * 2);
+  --pagez-radius-2xl: calc(var(--tenant-radius, 0.5rem) * 3);
+  --pagez-radius-3xl: calc(var(--tenant-radius, 0.5rem) * 4);
+  --pagez-radius-full: 9999px;
+
+  /*
+    Shadow tokens.
+
+    Shadows are kept subtle because Pagez renders both public influencer
+    portfolios and dense dashboard surfaces.
+  */
+  --pagez-shadow-2xs: 0 1px 2px 0 oklch(0 0 0 / 0.05);
+  --pagez-shadow-xs: 0 1px 3px 0 oklch(0 0 0 / 0.07), 0 1px 2px -1px oklch(0 0 0 / 0.07);
+  --pagez-shadow-sm: 0 2px 4px 0 oklch(0 0 0 / 0.07), 0 1px 2px -1px oklch(0 0 0 / 0.07);
+  --pagez-shadow-md: 0 4px 8px -2px oklch(0 0 0 / 0.08), 0 2px 4px -2px oklch(0 0 0 / 0.06);
+  --pagez-shadow-lg: 0 8px 16px -4px oklch(0 0 0 / 0.10), 0 4px 8px -4px oklch(0 0 0 / 0.07);
+  --pagez-shadow-xl: 0 12px 24px -6px oklch(0 0 0 / 0.12), 0 6px 12px -6px oklch(0 0 0 / 0.08);
+  --pagez-shadow-2xl: 0 24px 48px -12px oklch(0 0 0 / 0.18);
+
+  /*
+    Z-index tokens.
+
+    These are not mapped into Tailwind theme utilities in P01.4.
+    Components may use them through arbitrary values such as:
+      className="z-[var(--pagez-z-modal)]"
+    or through later component-specific utilities.
+  */
+  --pagez-z-hide: -1;
+  --pagez-z-base: 0;
+  --pagez-z-dropdown: 1000;
+  --pagez-z-sticky: 1020;
+  --pagez-z-overlay: 1030;
+  --pagez-z-modal: 1040;
+  --pagez-z-popover: 1050;
+  --pagez-z-toast: 1060;
+  --pagez-z-max: 2147483647;
+
+  /*
+    Motion tokens.
+
+    Durations and easings are centralized so P01.5 components do not invent
+    inconsistent animation values.
+  */
+  --pagez-duration-instant: 50ms;
+  --pagez-duration-fast: 150ms;
+  --pagez-duration-normal: 250ms;
+  --pagez-duration-slow: 400ms;
+  --pagez-duration-slower: 700ms;
+
+  --pagez-ease-linear: linear;
+  --pagez-ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --pagez-ease-out: cubic-bezier(0, 0, 0.2, 1);
+  --pagez-ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /*
+    Breakpoint tokens.
+
+    These mirror common Tailwind breakpoints and are mapped in theme-base.css.
+  */
+  --pagez-breakpoint-sm: 40rem;
+  --pagez-breakpoint-md: 48rem;
+  --pagez-breakpoint-lg: 64rem;
+  --pagez-breakpoint-xl: 80rem;
+  --pagez-breakpoint-2xl: 96rem;
+}

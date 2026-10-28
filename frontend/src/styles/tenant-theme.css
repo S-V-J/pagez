@@ -1,0 +1,66 @@
+/*
+FILE: frontend/src/styles/tenant-theme.css
+
+SYSTEMIC ROLE:
+  Documents and supports the tenant theme override contract.
+
+  Tenant themes are applied by setting --tenant-* CSS variables on an ancestor
+  element. The most common scopes will be:
+    - <html> for platform-wide preview themes
+    - <body> for public tenant page themes
+    - a dashboard layout wrapper for authenticated tenant themes
+    - a portfolio preview wrapper for builder live-preview themes
+
+  This file does not define tenant values for specific tenants.
+  Specific tenant values come from database-backed theme records in later
+  phases, especially P02, P06, and P16.
+
+EXAMPLE USAGE:
+  <body style="--tenant-primary: oklch(55% 0.2 264); --tenant-radius: 0.75rem;">
+    ...
+  </body>
+
+  Or through TypeScript:
+    import { tenantThemeToCssVariables } from "@/design-system/tenant-theme";
+
+    const style = tenantThemeToCssVariables({
+      primary: "oklch(55% 0.2 264)",
+      radius: "lg",
+    }) as React.CSSProperties;
+
+    <div style={style}>...</div>
+*/
+
+/*
+  Optional convenience scope.
+
+  Components or layouts may add this class to make the tenant theme boundary
+  explicit in markup and tests.
+*/
+.tenant-theme-scope {
+  color: var(--pagez-foreground);
+  background-color: var(--pagez-background);
+  font-family: var(--pagez-font-sans);
+}
+
+/*
+  Inverse tenant scope.
+
+  This is useful for promotional bands, hero sections, or temporary dark/light
+  inversions without changing the global theme.
+*/
+.tenant-theme-inverse {
+  color: var(--pagez-background);
+  background-color: var(--pagez-foreground);
+}
+
+/*
+  Color scheme hint.
+
+  If a tenant theme supplies --tenant-color-scheme, browsers can use it for
+  native form controls and scrollbars.
+*/
+html,
+body {
+  color-scheme: var(--tenant-color-scheme, light dark);
+}

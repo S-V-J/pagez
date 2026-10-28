@@ -1,26 +1,27 @@
+/*
+FILE: frontend/src/app/globals.css
+
+SYSTEMIC ROLE:
+  Global CSS entrypoint for the Pagez frontend.
+
+  This file intentionally contains only imports.
+  The actual token definitions live in:
+    ../styles/design-tokens.css
+    ../styles/theme-base.css
+    ../styles/theme-dark.css
+    ../styles/tenant-theme.css
+
+  Import order matters:
+  1. Tailwind CSS core.
+  2. Raw Pagez design tokens.
+  3. Tailwind theme mapping and base layer.
+  4. Dark theme overrides.
+  5. Tenant theme override contract.
+*/
+
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
-}
+@import "../styles/design-tokens.css";
+@import "../styles/theme-base.css";
+@import "../styles/theme-dark.css";
+@import "../styles/tenant-theme.css";

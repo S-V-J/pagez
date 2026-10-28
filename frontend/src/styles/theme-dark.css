@@ -1,0 +1,80 @@
+/*
+FILE: frontend/src/styles/theme-dark.css
+
+SYSTEMIC ROLE:
+  Overrides raw Pagez design tokens for dark mode.
+
+  Dark mode is activated by:
+    .dark
+    [data-theme="dark"]
+
+  The no-flash script in frontend/src/design-system/theme.ts applies these
+  attributes based on stored user preference or system preference.
+
+  This file must not define Tailwind utilities.
+  It only overrides --pagez-* variables.
+  Tenant variables may still override these values when set on a dark-mode
+  ancestor or when using tenant-dark-* style overrides documented in
+  docs/design-system/tokens.md.
+*/
+
+.dark,
+[data-theme="dark"] {
+  --pagez-background: var(--tenant-background, oklch(13% 0.02 260));
+  --pagez-foreground: var(--tenant-foreground, oklch(98% 0.01 260));
+
+  --pagez-card: var(--tenant-card, oklch(18% 0.02 260));
+  --pagez-card-foreground: var(--tenant-card-foreground, var(--pagez-foreground));
+
+  --pagez-popover: var(--tenant-popover, oklch(15% 0.02 260));
+  --pagez-popover-foreground: var(--tenant-popover-foreground, var(--pagez-foreground));
+
+  --pagez-primary: var(--tenant-primary, oklch(65% 0.2 264));
+  --pagez-primary-foreground: var(--tenant-primary-foreground, oklch(15% 0.02 264));
+
+  --pagez-secondary: var(--tenant-secondary, oklch(24% 0.03 264));
+  --pagez-secondary-foreground: var(--tenant-secondary-foreground, oklch(96% 0.01 264));
+
+  --pagez-muted: var(--tenant-muted, oklch(24% 0.03 264));
+  --pagez-muted-foreground: var(--tenant-muted-foreground, oklch(70% 0.03 264));
+
+  --pagez-accent: var(--tenant-accent, oklch(28% 0.04 264));
+  --pagez-accent-foreground: var(--tenant-accent-foreground, oklch(96% 0.01 264));
+
+  --pagez-destructive: var(--tenant-destructive, oklch(65% 0.2 25));
+  --pagez-destructive-foreground: var(--tenant-destructive-foreground, oklch(15% 0.02 25));
+
+  --pagez-success: var(--tenant-success, oklch(65% 0.15 150));
+  --pagez-success-foreground: var(--tenant-success-foreground, oklch(15% 0.02 150));
+
+  --pagez-warning: var(--tenant-warning, oklch(75% 0.16 80));
+  --pagez-warning-foreground: var(--tenant-warning-foreground, oklch(18% 0.04 80));
+
+  --pagez-info: var(--tenant-info, oklch(65% 0.15 230));
+  --pagez-info-foreground: var(--tenant-info-foreground, oklch(15% 0.02 230));
+
+  --pagez-border: var(--tenant-border, oklch(28% 0.03 264));
+  --pagez-input: var(--tenant-input, oklch(30% 0.03 264));
+  --pagez-ring: var(--tenant-ring, oklch(65% 0.15 264));
+
+  --pagez-overlay: var(--tenant-overlay, oklch(0% 0 0 / 0.70));
+  --pagez-scrim: var(--tenant-scrim, oklch(0% 0 0 / 0.45));
+
+  --pagez-chart-1: var(--tenant-chart-1, oklch(65% 0.18 264));
+  --pagez-chart-2: var(--tenant-chart-2, oklch(70% 0.16 150));
+  --pagez-chart-3: var(--tenant-chart-3, oklch(75% 0.16 80));
+  --pagez-chart-4: var(--tenant-chart-4, oklch(70% 0.18 25));
+  --pagez-chart-5: var(--tenant-chart-5, oklch(65% 0.15 320));
+
+  /*
+    Dark shadows are slightly stronger because low-contrast surfaces need
+    more separation.
+  */
+  --pagez-shadow-2xs: 0 1px 2px 0 oklch(0 0 0 / 0.18);
+  --pagez-shadow-xs: 0 1px 3px 0 oklch(0 0 0 / 0.22), 0 1px 2px -1px oklch(0 0 0 / 0.20);
+  --pagez-shadow-sm: 0 2px 4px 0 oklch(0 0 0 / 0.24), 0 1px 2px -1px oklch(0 0 0 / 0.20);
+  --pagez-shadow-md: 0 4px 8px -2px oklch(0 0 0 / 0.28), 0 2px 4px -2px oklch(0 0 0 / 0.22);
+  --pagez-shadow-lg: 0 8px 16px -4px oklch(0 0 0 / 0.34), 0 4px 8px -4px oklch(0 0 0 / 0.24);
+  --pagez-shadow-xl: 0 12px 24px -6px oklch(0 0 0 / 0.40), 0 6px 12px -6px oklch(0 0 0 / 0.28);
+  --pagez-shadow-2xl: 0 24px 48px -12px oklch(0 0 0 / 0.52);
+}

@@ -84,3 +84,7 @@ vault/
 # Miscellaneous
 *.tgz
 *.tar.gz
+
+# Nested pnpm workspace configs are forbidden in the Pagez monorepo.
+frontend/pnpm-workspace.yaml
+backend/pnpm-workspace.yaml

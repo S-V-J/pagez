@@ -19,6 +19,30 @@ DARK MODE STRATEGY:
 
   The no-flash initialization script in frontend/src/design-system/theme.ts
   sets these attributes before React hydration.
+
+BREAKPOINT CONSTRAINT (P01.5.A.R2):
+  Tailwind v4 generates responsive utilities (sm:, md:, lg:, etc.) and
+  .container max-width rules by emitting @media (width >= <value>) conditions.
+
+  The CSS specification forbids var() inside @media feature values because
+  media queries are evaluated before the cascade resolves custom properties.
+
+  Therefore, --breakpoint-* values in this @theme block MUST be literal
+  CSS lengths (rem, px, em, etc.), NOT var() references.
+
+  The canonical breakpoint values are also documented as --pagez-breakpoint-*
+  variables in design-tokens.css and mirrored in the TypeScript
+  BREAKPOINT_TOKENS constant in frontend/src/design-system/tokens.ts.
+
+  If a breakpoint value changes, all three locations must be updated
+  atomically:
+    1. frontend/src/styles/design-tokens.css  (--pagez-breakpoint-*)
+    2. frontend/src/styles/theme-base.css     (@theme --breakpoint-*)
+    3. frontend/src/design-system/tokens.ts   (BREAKPOINT_TOKENS)
+
+  This constraint does NOT apply to colors, fonts, spacing, radius, shadows,
+  or easing, because those appear in property values (not @media conditions)
+  and therefore safely accept var() references.
 */
 
 @custom-variant dark (&:where(.dark, .dark *, [data-theme="dark"], [data-theme="dark"] *));
@@ -35,6 +59,9 @@ DARK MODE STRATEGY:
         text-primary
         border-primary
         ring-primary
+
+    var() is safe here because color values appear in CSS property values,
+    not in @media conditions.
   */
   --color-background: var(--pagez-background);
   --color-foreground: var(--pagez-foreground);
@@ -90,6 +117,9 @@ DARK MODE STRATEGY:
       font-sans
       font-mono
       font-display
+
+    var() is safe here because font-family values appear in CSS property
+    values, not in @media conditions.
   */
   --font-sans: var(--pagez-font-sans);
   --font-mono: var(--pagez-font-mono);
@@ -99,6 +129,7 @@ DARK MODE STRATEGY:
     Spacing token mapping.
 
     Tailwind v4 uses --spacing as the base spacing unit.
+    var() is safe here because spacing values appear in CSS property values.
   */
   --spacing: var(--pagez-spacing);
 
@@ -106,6 +137,7 @@ DARK MODE STRATEGY:
     Radius token mapping.
 
     Tailwind v4 generates rounded-* utilities from --radius-*.
+    var() is safe here because radius values appear in CSS property values.
   */
   --radius-none: var(--pagez-radius-none);
   --radius-sm: var(--pagez-radius-sm);
@@ -120,6 +152,7 @@ DARK MODE STRATEGY:
     Shadow token mapping.
 
     Tailwind v4 generates shadow-* utilities from --shadow-*.
+    var() is safe here because shadow values appear in CSS property values.
   */
   --shadow-2xs: var(--pagez-shadow-2xs);
   --shadow-xs: var(--pagez-shadow-xs);
@@ -132,18 +165,33 @@ DARK MODE STRATEGY:
   /*
     Breakpoint token mapping.
 
-    Tailwind v4 generates responsive prefixes from --breakpoint-*.
+    CRITICAL: These MUST be literal values, NOT var() references.
+
+    Tailwind v4 uses --breakpoint-* to generate @media (width >= <value>)
+    conditions for responsive utilities (sm:, md:, lg:, xl:, 2xl:) and
+    .container max-width rules.
+
+    The CSS specification forbids var() inside @media feature values.
+    Using var() here causes Turbopack and all CSS parsers to reject the
+    generated stylesheet with "Unexpected token Function(var)".
+
+    These values are the canonical Pagez breakpoints. They must stay
+    synchronized with:
+      - --pagez-breakpoint-* in design-tokens.css
+      - BREAKPOINT_TOKENS in frontend/src/design-system/tokens.ts
   */
-  --breakpoint-sm: var(--pagez-breakpoint-sm);
-  --breakpoint-md: var(--pagez-breakpoint-md);
-  --breakpoint-lg: var(--pagez-breakpoint-lg);
-  --breakpoint-xl: var(--pagez-breakpoint-xl);
-  --breakpoint-2xl: var(--pagez-breakpoint-2xl);
+  --breakpoint-sm: 40rem;
+  --breakpoint-md: 48rem;
+  --breakpoint-lg: 64rem;
+  --breakpoint-xl: 80rem;
+  --breakpoint-2xl: 96rem;
 
   /*
     Easing token mapping.
 
     Tailwind v4 generates easing utilities from --ease-*.
+    var() is safe here because easing values appear in CSS property values
+    (transition-timing-function), not in @media conditions.
   */
   --ease-linear: var(--pagez-ease-linear);
   --ease-in: var(--pagez-ease-in);

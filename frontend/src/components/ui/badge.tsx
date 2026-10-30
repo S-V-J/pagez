@@ -22,10 +22,16 @@
 //     ARIA role is needed for <span> content.
 //
 //   DESIGN TOKEN CONTRACT:
-//   - variant: default | secondary | destructive | outline | success | warning | info
+//   - variant: default | secondary | destructive | outline | accent | success | warning | info
 //   - All colors reference semantic tokens.
-//   - Radius uses --pagez-radius-full for pill shape.
+//   - Radius uses --pagez-radius-full through rounded-full.
 //   - Dark mode and tenant overrides are automatic.
+//
+//   REPAIR NOTE (P01.6.R2):
+//   Adds the accent variant so the design-system showcase can demonstrate
+//   tenant accent branding through semantic tokens instead of hardcoded
+//   palette utilities. The accent token already exists in the Pagez token
+//   contract and is already mapped by Tailwind v4 through theme-base.css.
 
 import { Slot } from "@radix-ui/react-slot";
 import { cva, type VariantProps } from "class-variance-authority";
@@ -34,7 +40,7 @@ import type * as React from "react";
 import { cn } from "@/lib/utils";
 
 const badgeVariants = cva(
-  "inline-flex items-center justify-center rounded-full border px-2 py-0.5 text-xs font-medium w-fit whitespace-nowrap shrink-0 [&>svg]:size-3 [&>svg]:pointer-events-none gap-1 transition-[color,background-color,border-color] duration-(--pagez-duration-fast) ease-(--pagez-ease-out) overflow-hidden",
+  "inline-flex items-center justify-center rounded-full border px-2 py-0.5 text-xs font-medium w-fit whitespace-nowrap shrink-0 [&>svg]:size-3 [&>svg]:pointer-events-none gap-1 transition-[color,background-color,border-color] duration-[var(--pagez-duration-fast)] ease-[var(--pagez-ease-out)] overflow-hidden",
   {
     variants: {
       variant: {
@@ -46,6 +52,8 @@ const badgeVariants = cva(
           "border-transparent bg-destructive text-destructive-foreground [a&]:hover:bg-destructive/90",
         outline:
           "text-foreground [a&]:hover:bg-accent [a&]:hover:text-accent-foreground",
+        accent:
+          "border-transparent bg-accent text-accent-foreground [a&]:hover:bg-accent/90",
         success:
           "border-transparent bg-success text-success-foreground [a&]:hover:bg-success/90",
         warning:
@@ -66,7 +74,12 @@ interface BadgeProps
   asChild?: boolean;
 }
 
-function Badge({ className, variant, asChild = false, ...props }: BadgeProps) {
+function Badge({
+  className,
+  variant,
+  asChild = false,
+  ...props
+}: BadgeProps) {
   const Comp = asChild ? Slot : "span";
 
   return (

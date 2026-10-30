@@ -27,7 +27,7 @@
 //   - Supports dark mode and tenant overrides automatically.
 //
 //   HYDRATION SAFETY:
-//   This component does not call bare new Date() during render.
+//   This component does not call bare current-date construction during render.
 //   Consumers must pass month and optionally today/value as Date objects.
 //   This prevents server/client timezone/date drift hydration mismatches.
 

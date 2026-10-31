@@ -1,6 +1,6 @@
 # Pagez Design System Showcase
 
-Status: P01.6 implementation
+Status: P01.6 recovery implementation
 Phase: P01 Design system and UI kit
 Route: `/showcase`
 Source of truth: `PRD.md`
@@ -48,6 +48,7 @@ frontend/src/components/showcase/showcase-section.tsx
 frontend/src/components/showcase/showcase-theme-toggle.tsx
   Theme cycling control.
   Applies light/dark/system mode without page reload.
+  Uses React.useSyncExternalStore for hydration-safe browser theme state.
 
 frontend/src/components/showcase/showcase-tenant-preview.tsx
   Tenant theme override preview.
@@ -132,11 +133,7 @@ The toggle cycles:
 Light -> Dark -> System -> Light
 ```
 
-It persists the preference using:
-
-```text
-localStorage["pagez.theme"]
-```
+It persists the preference using the Pagez theme storage key.
 
 It applies:
 
@@ -176,7 +173,8 @@ prop drilling.
 
 The showcase avoids browser-only APIs during initial render.
 
-The theme toggle renders a disabled placeholder until mounted.
+The theme toggle uses `React.useSyncExternalStore` with a deterministic server
+snapshot.
 
 The calendar uses deterministic module-level Date constants:
 

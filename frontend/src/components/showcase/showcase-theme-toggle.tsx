@@ -19,24 +19,22 @@
 //   Pagez theme helper. This avoids SSR/browser mismatch and avoids the
 //   react-hooks/set-state-in-effect lint error.
 //
-//   REPAIR NOTES (P01.6.R2):
+//   RECOVERY NOTES (P01-R4):
 //   1. Removed effect-based state initialization.
 //   2. Removed transient mounted state variable.
 //   3. Removed synchronous state updates during effect execution.
 //   4. Added external subscription through useSyncExternalStore.
 //   5. Added cross-tab storage synchronization through the storage event.
 //   6. Theme DOM application now happens only in the explicit user click
-//      handler, not during render and not during effect execution.
+//      handler or cross-tab storage callback, not during render.
+//   7. THEME_STORAGE_KEY is imported from design-system/tokens because
+//      design-system/theme does not re-export it.
 
 import * as React from "react";
 
 import { Button } from "@/components/ui";
-import {
-  THEME_STORAGE_KEY,
-  readStoredThemeMode,
-  writeStoredThemeMode,
-} from "@/design-system/theme";
-import type { ThemeMode } from "@/design-system/tokens";
+import { readStoredThemeMode, writeStoredThemeMode } from "@/design-system/theme";
+import { THEME_STORAGE_KEY, type ThemeMode } from "@/design-system/tokens";
 
 type ThemeListener = () => void;
 
@@ -59,6 +57,10 @@ function applyThemeMode(mode: ThemeMode): void {
 }
 
 function getThemeSnapshot(): ThemeMode {
+  if (typeof window === "undefined") {
+    return "system";
+  }
+
   if (cachedThemeMode === null) {
     cachedThemeMode = readStoredThemeMode();
   }
@@ -90,6 +92,7 @@ function subscribeThemeMode(listener: ThemeListener): () => void {
   const handleStorage = (event: StorageEvent) => {
     if (event.key === THEME_STORAGE_KEY || event.key === null) {
       cachedThemeMode = null;
+      applyThemeMode(getThemeSnapshot());
       listener();
     }
   };

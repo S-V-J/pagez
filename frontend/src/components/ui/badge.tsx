@@ -27,7 +27,7 @@
 //   - Radius uses --pagez-radius-full through rounded-full.
 //   - Dark mode and tenant overrides are automatic.
 //
-//   REPAIR NOTE (P01.6.R2):
+//   RECOVERY NOTE (P01-R3):
 //   Adds the accent variant so the design-system showcase can demonstrate
 //   tenant accent branding through semantic tokens instead of hardcoded
 //   palette utilities. The accent token already exists in the Pagez token

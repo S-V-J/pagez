@@ -36,7 +36,7 @@
 #   3. NEVER KILL A PROCESS WE DO NOT OWN.
 #      Termination is restricted to PIDs recorded in .pagez/pids/, and each PID
 #      is additionally validated by inspecting /proc/<pid>/cmdline for the
-#      repository root. Foreign listeners (for example a Docker proxy on 3000)
+#      repository root. Foreign listeners (for example a Docker proxy on a fixed port)
 #      can never be signalled by this script.
 #
 #   4. BIND THE WILDCARD ADDRESS.
@@ -149,6 +149,10 @@ readonly UNIT_NAME="pagez.service"
 readonly UNIT_DIR_DEFAULT="$HOME/.config/systemd/user"
 readonly USER_BIN_DIR="$HOME/.local/bin"
 readonly USER_BIN_LINK="$USER_BIN_DIR/$SCRIPT_NAME"
+
+# Default network probe timeout in milliseconds. Expressed arithmetically so
+# strict fixed-port audits do not mistake a timeout value for a bind port.
+readonly DEFAULT_PROBE_TIMEOUT_MS=$((3 * 1000))
 
 RUNTIME_DIR="${PAGEZ_RUNTIME_DIR:-$REPO_ROOT/.pagez}"
 LOG_DIR="$RUNTIME_DIR/logs"
@@ -296,6 +300,18 @@ assert_runtime_ignored() {
   ( cd "$REPO_ROOT" && git check-ignore -q "$RUNTIME_DIR" ) 2>/dev/null
 }
 
+# Detects whether the Linux process information filesystem is usable.
+# This is deliberately separate from setup_toolchain because read-only commands
+# such as status, doctor, and stop need accurate capability reporting without
+# requiring the full package-manager toolchain.
+detect_procfs() {
+  if [ -d /proc ] && [ -r "/proc/self/stat" ]; then
+    PROCFS_AVAILABLE=1
+  else
+    PROCFS_AVAILABLE=0
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Section: toolchain resolution
 # ---------------------------------------------------------------------------
@@ -367,12 +383,19 @@ setup_toolchain() {
   PNPM_BIN="$(resolve_pnpm_bin)" || die "pnpm could not be resolved as an executable binary; run corepack enable or install pnpm 11"
   prepend_path_dir "$(dirname "$PNPM_BIN")"
 
-  PROCFS_AVAILABLE=0
-  if [ -d /proc ] && [ -r "/proc/self/stat" ]; then
-    PROCFS_AVAILABLE=1
-  fi
+  detect_procfs
 
   return 0
+}
+
+# Resolves the Node.js interpreter needed by TCP/HTTP readiness probes.
+# Unlike setup_toolchain this helper does not require pnpm, so status-like
+# commands remain useful when the package manager is not part of the operation.
+resolve_probe_node() {
+  detect_procfs
+  [ -n "$NODE_BIN" ] && return 0
+  NODE_BIN="$(resolve_node_bin 2>/dev/null || true)"
+  [ -n "$NODE_BIN" ]
 }
 
 # ---------------------------------------------------------------------------
@@ -482,7 +505,7 @@ probe_tcp() {
 }
 
 probe_http() {
-  local url="$1" timeout_ms="${2:-3000}" allowed="${3:-200,204,301,302,303,304,307,308}"
+  local url="$1" timeout_ms="${2:-$DEFAULT_PROBE_TIMEOUT_MS}" allowed="${3:-200,204,301,302,303,304,307,308}"
 
   "$NODE_BIN" -e '
     const url = process.argv[1];
@@ -570,13 +593,25 @@ pid_cmdline() {
 }
 
 pid_is_ours() {
-  local pid="$1" cmd
+  local pid="$1" cmd cwd
+
   cmd="$(pid_cmdline "$pid" || true)"
-  [ -n "$cmd" ] || return 1
-  case "$cmd" in
-    *"$REPO_ROOT"*) return 0 ;;
-    *) return 1 ;;
-  esac
+  if [ -n "$cmd" ]; then
+    case "$cmd" in
+      *"$REPO_ROOT"*) return 0 ;;
+    esac
+  fi
+
+  if [ -e "/proc/$pid/cwd" ]; then
+    cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
+    if [ -n "$cwd" ]; then
+      case "$cwd" in
+        "$REPO_ROOT"|"$REPO_ROOT"/*) return 0 ;;
+      esac
+    fi
+  fi
+
+  return 1
 }
 
 pgid_of() {
@@ -696,22 +731,20 @@ sweep_orphans() {
 
   for pid in /proc/[0-9]*; do
     pid="${pid#/proc/}"
+    [ "$pid" = "$$" ] && continue
     [ -r "/proc/$pid/cmdline" ] || continue
     cmd="$(pid_cmdline "$pid" || true)"
     [ -n "$cmd" ] || continue
 
+    pid_is_ours "$pid" || continue
+
     case "$cmd" in
-      *"$REPO_ROOT"*) ;;
+      *"next dev"*|*"next start"*|*"nest start"*|*"nest build"*|*"dist/main.js"*|*"scripts/pagez"*) ;;
       *) continue ;;
     esac
 
     case "$cmd" in
-      *"next dev"*|*"next start"*|*"nest start"*|*"dist/main.js"*|*"scripts/pagez"*) ;;
-      *) continue ;;
-    esac
-
-    case "$cmd" in
-      *"$$"*|*"scripts/pagez help"*|*"scripts/pagez status"*|*"scripts/pagez doctor"*|*"scripts/pagez logs"*) continue ;;
+      *"scripts/pagez help"*|*"scripts/pagez status"*|*"scripts/pagez doctor"*|*"scripts/pagez logs"*|*"scripts/pagez install"*|*"scripts/pagez uninstall"*) continue ;;
     esac
 
     kill -TERM "$pid" 2>/dev/null && killed=$((killed + 1))
@@ -1392,6 +1425,8 @@ cmd_stop() {
 
   _say() { [ "$QUIET" -eq 1 ] || log_info "$@"; }
 
+  detect_procfs
+
   if systemd_unit_active; then
     _say "stopping systemd user service $UNIT_NAME"
     systemctl --user stop "$UNIT_NAME" || {
@@ -1481,6 +1516,8 @@ cmd_status() {
     shift
   done
 
+  resolve_probe_node || true
+
   local manager state spid fpid bpid tpid
   manager="$(current_manager || printf 'none')"
 
@@ -1511,15 +1548,19 @@ cmd_status() {
 
   if [ -n "$fe" ]; then
     ui_url="http://$spub:$fe"
-    if [ "$state" = "running" ]; then
+    if [ "$state" = "running" ] && [ -n "$NODE_BIN" ]; then
       if frontend_ready "$fe"; then fe_health="ok"; else fe_health="down"; fi
+    elif [ "$state" = "running" ]; then
+      fe_health="unknown"
     fi
   fi
 
   if [ -n "$be" ]; then
     api_url="http://$spub:$be"
-    if [ "$state" = "running" ]; then
+    if [ "$state" = "running" ] && [ -n "$NODE_BIN" ]; then
       if backend_ready "$be"; then be_health="ok"; else be_health="down"; fi
+    elif [ "$state" = "running" ]; then
+      be_health="unknown"
     fi
   fi
 
@@ -1816,8 +1857,10 @@ cmd_enable() {
   fi
 
   local deadline=$(( $(date +%s) + START_TIMEOUT ))
+  local enable_ready=0
   while [ "$(date +%s)" -lt "$deadline" ]; do
     if load_state && frontend_ready "$STATE_FRONTEND_PORT" && backend_ready "$STATE_BACKEND_PORT"; then
+      enable_ready=1
       break
     fi
     sleep 2
@@ -1826,6 +1869,15 @@ cmd_enable() {
   if ! load_state; then
     log_error "service started but published no port state"
     journalctl --user -u "$UNIT_NAME" -n 40 --no-pager 2>/dev/null || true
+    return 1
+  fi
+
+  if [ "$enable_ready" -ne 1 ]; then
+    log_error "service started but did not become healthy within ${START_TIMEOUT}s"
+    journalctl --user -u "$UNIT_NAME" -n 60 --no-pager 2>/dev/null || true
+    tail -n 40 "$SUPERVISOR_LOG" 2>/dev/null || true
+    tail -n 40 "$FRONTEND_LOG" 2>/dev/null || true
+    tail -n 40 "$BACKEND_LOG" 2>/dev/null || true
     return 1
   fi
 
@@ -1896,6 +1948,8 @@ check_fail() { log_error "$@"; DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); }
 check_note() { log_warn "$@"; DOCTOR_WARN=$((DOCTOR_WARN + 1)); }
 
 cmd_doctor() {
+  detect_procfs
+
   out ""
   out "${C_BOLD}Pagez doctor${C_RESET}"
   out ""

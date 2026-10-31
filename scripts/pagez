@@ -1,104 +1,2278 @@
 #!/usr/bin/env bash
 #
-# scripts/pagez — Pagez local operations entrypoint
+# FILE: scripts/pagez
 #
-# P00 foundation stub. The production-quality CLI (start, stop, restart,
-# status, logs, enable, disable, doctor, tunnel) is owned by phase P17
-# (WSL pagez command system, PRD §14.1 and phase prompt P17). Until P17 is
-# done, every operational subcommand fails with an explicit phase-dependency
-# message. `help` works in this phase.
+# SYSTEMIC ROLE:
+#   Pagez local operations entrypoint and dynamic-port process supervisor.
+#
+#   This script is the single control plane for running Pagez on a developer
+#   machine (WSL2 or plain Linux) and inside a Linux container. It owns:
+#
+#     - dynamic free-port allocation for every Pagez network listener
+#     - background start/stop/restart of the frontend and backend
+#     - runtime state under the Git-ignored .pagez/ directory
+#     - health verification before declaring success
+#     - status reporting including the openable web UI URL
+#     - log access
+#     - systemd user service installation for autostart (enable/disable)
+#     - environment validation (doctor)
+#     - a Cloudflare quick-tunnel harness bound to the dynamic frontend port
+#     - PATH installation of the "pagez" command itself
+#
+#   DESIGN INVARIANTS (non-negotiable):
+#
+#   1. NO FIXED PORTS.
+#      Ports are obtained by binding a throwaway socket to port 0 and reading
+#      the kernel-assigned value. The kernel is the only authority that can
+#      guarantee a port was free at instantiation time. Scanning "free" ports
+#      with ss/lsof is racy and platform-specific and is therefore never used.
+#
+#   2. ALLOCATE, THEN VERIFY, THEN RETRY.
+#      Probe-then-bind is inherently racy: another process can claim the port
+#      between the probe closing and the service binding. Every start therefore
+#      verifies the service actually answers on the allocated port, and retries
+#      allocation with a fresh port when verification fails.
+#
+#   3. NEVER KILL A PROCESS WE DO NOT OWN.
+#      Termination is restricted to PIDs recorded in .pagez/pids/, and each PID
+#      is additionally validated by inspecting /proc/<pid>/cmdline for the
+#      repository root. Foreign listeners (for example a Docker proxy on 3000)
+#      can never be signalled by this script.
+#
+#   4. BIND THE WILDCARD ADDRESS.
+#      Services bind 0.0.0.0 so that WSL2 localhost forwarding reaches the app
+#      from the Windows browser and Docker -p publishing reaches it from the
+#      host. Loopback-only binding is a functional defect in both environments.
+#
+#   5. RESOLVE THE REAL INTERPRETER, NOT AN ALIAS OR WRAPPER.
+#      On some hosts "node" is an interactive alias or a wrapper that performs
+#      memory admission and writes log noise to the stream. Background services
+#      must not depend on that. The true interpreter is discovered through
+#      process.execPath and its directory is prepended to PATH so that every
+#      child process, including shebangs using "#!/usr/bin/env node", resolves
+#      to the real binary.
+#
+#   6. ALL STATE LIVES UNDER .pagez/ AND IS GIT-IGNORED.
+#      Ports, PIDs, locks, and logs are local runtime artifacts. Nothing they
+#      touch is ever committed.
+#
+#   7. PORTABILITY OVER HOST SPECIFICITY.
+#      Every path is derived from the resolved location of this script. No
+#      absolute home directory is baked in. Optional tools degrade gracefully
+#      (setsid, flock, systemctl, cloudflared, browser openers).
+#
+#   SUBCOMMANDS:
+#     start      Allocate free ports, launch services in background, verify,
+#                print the web UI URL.
+#     stop       Terminate the supervised process tree, remove runtime port
+#                state, preserve logs.
+#     restart    stop then start.
+#     status     Report manager, state, mode, uptime, PIDs, ports, health, and
+#                the openable web UI URL. Supports --json.
+#     logs       Follow or dump supervisor/frontend/backend/tunnel logs.
+#     enable     Generate and enable a systemd user service for autostart.
+#     disable    Stop and disable the systemd user service.
+#     doctor     Validate the environment without starting anything.
+#     tunnel     Start/stop/inspect a Cloudflare quick tunnel against the
+#                dynamic frontend port.
+#     install    Symlink this script into ~/.local/bin/pagez.
+#     uninstall  Remove that symlink if it points at this repository.
+#     help       Usage.
+#     _run       INTERNAL. Foreground supervisor body. Never call directly.
+#
+#   ENVIRONMENT OVERRIDES:
+#     PAGEZ_MODE                 dev|prod                     (default dev)
+#     PAGEZ_HOST                 bind address                 (default 0.0.0.0)
+#     PAGEZ_PUBLIC_HOST          host used in printed URLs    (default localhost)
+#     PAGEZ_NETWORK_HOST         explicit LAN host for URL printing
+#     PAGEZ_RUNTIME_DIR          runtime dir                  (default <repo>/.pagez)
+#     PAGEZ_START_TIMEOUT        seconds to reach healthy     (default dev 120, prod 60)
+#     PAGEZ_STOP_TIMEOUT         seconds before SIGKILL       (default 15)
+#     PAGEZ_ALLOC_RETRIES        port allocation attempts     (default 5)
+#     PAGEZ_FRONTEND_PORT        force a specific port        (default dynamic)
+#     PAGEZ_BACKEND_PORT         force a specific port        (default dynamic)
+#     PAGEZ_SKIP_BUILD           1 skips prod builds          (default 0)
+#     PAGEZ_BYPASS_MPS_ADMIT     0 restores a node wrapper    (default 1)
+#     PAGEZ_NO_COLOR             1 disables color
+#     PAGEZ_HYPERLINKS           1 emits OSC 8 clickable links
+#     PAGEZ_BACKEND_HEALTH_PATH  optional HTTP path for backend readiness
+#
+#   EXIT CODES:
+#     0 success
+#     1 operational failure
+#     2 usage error
+#     3 environment/dependency failure (doctor)
 
 set -euo pipefail
 
-SCRIPT_NAME="pagez"
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# ---------------------------------------------------------------------------
+# Section: self location and repository root
+# ---------------------------------------------------------------------------
+#
+# BASH_SOURCE[0] is the path used to invoke this script. When the command is
+# installed as a symlink (~/.local/bin/pagez -> scripts/pagez), the naive
+# dirname would resolve to the symlink's directory and produce a wrong repo
+# root. The loop below follows every symlink hop, including relative targets,
+# using -P so that ".." components are resolved against the physical path.
 
-readonly PHASE_OWNER="P17 (WSL pagez command system — PRD §14.1, phase prompt P17)"
+resolve_self_path() {
+  local src="${BASH_SOURCE[0]}"
+  local dir
 
-fail_phase_dependency() {
-  local cmd="$1"
-  echo "${SCRIPT_NAME}: ${cmd} is not yet implemented — owned by ${PHASE_OWNER}" >&2
-  echo "Run '${SCRIPT_NAME} help' for usage." >&2
+  while [ -L "$src" ]; do
+    dir="$(cd -P "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    case "$src" in
+      /*) ;;
+      *) src="$dir/$src" ;;
+    esac
+  done
+
+  cd -P "$(dirname "$src")" >/dev/null 2>&1 || return 1
+  printf '%s/%s\n' "$(pwd)" "$(basename "$src")"
+}
+
+SELF_PATH="$(resolve_self_path)" || {
+  printf 'pagez: fatal: unable to resolve script location\n' >&2
+  exit 1
+}
+
+REPO_ROOT="$(cd -P "$(dirname "$SELF_PATH")/.." && pwd)"
+
+# ---------------------------------------------------------------------------
+# Section: constants
+# ---------------------------------------------------------------------------
+
+readonly SCRIPT_NAME="pagez"
+readonly SUPERVISOR_ARG="_run"
+readonly UNIT_NAME="pagez.service"
+readonly UNIT_DIR_DEFAULT="$HOME/.config/systemd/user"
+readonly USER_BIN_DIR="$HOME/.local/bin"
+readonly USER_BIN_LINK="$USER_BIN_DIR/$SCRIPT_NAME"
+
+RUNTIME_DIR="${PAGEZ_RUNTIME_DIR:-$REPO_ROOT/.pagez}"
+LOG_DIR="$RUNTIME_DIR/logs"
+PID_DIR="$RUNTIME_DIR/pids"
+LOCK_DIR="$RUNTIME_DIR/lock"
+PORTS_FILE="$RUNTIME_DIR/ports.env"
+
+SUPERVISOR_LOG="$LOG_DIR/pagez.log"
+FRONTEND_LOG="$LOG_DIR/frontend.log"
+BACKEND_LOG="$LOG_DIR/backend.log"
+TUNNEL_LOG="$LOG_DIR/tunnel.log"
+
+SUPERVISOR_PID_FILE="$PID_DIR/supervisor.pid"
+FRONTEND_PID_FILE="$PID_DIR/frontend.pid"
+BACKEND_PID_FILE="$PID_DIR/backend.pid"
+TUNNEL_PID_FILE="$PID_DIR/tunnel.pid"
+
+MODE="${PAGEZ_MODE:-dev}"
+HOST_BIND="${PAGEZ_HOST:-0.0.0.0}"
+PUBLIC_HOST="${PAGEZ_PUBLIC_HOST:-localhost}"
+NETWORK_HOST_OVERRIDE="${PAGEZ_NETWORK_HOST:-}"
+STOP_TIMEOUT="${PAGEZ_STOP_TIMEOUT:-15}"
+ALLOC_RETRIES="${PAGEZ_ALLOC_RETRIES:-5}"
+SKIP_BUILD="${PAGEZ_SKIP_BUILD:-0}"
+BYPASS_MPS_ADMIT="${PAGEZ_BYPASS_MPS_ADMIT:-1}"
+BACKEND_HEALTH_PATH="${PAGEZ_BACKEND_HEALTH_PATH:-}"
+NO_COLOR_FLAG="${PAGEZ_NO_COLOR:-0}"
+HYPERLINKS_FLAG="${PAGEZ_HYPERLINKS:-0}"
+
+START_TIMEOUT="${PAGEZ_START_TIMEOUT:-}"
+if [ -z "$START_TIMEOUT" ]; then
+  case "$MODE" in
+    prod) START_TIMEOUT=60 ;;
+    *) START_TIMEOUT=120 ;;
+  esac
+fi
+
+FORCED_FRONTEND_PORT="${PAGEZ_FRONTEND_PORT:-}"
+FORCED_BACKEND_PORT="${PAGEZ_BACKEND_PORT:-}"
+
+NODE_BIN=""
+PNPM_BIN=""
+PROCFS_AVAILABLE=0
+
+# ---------------------------------------------------------------------------
+# Section: output helpers
+# ---------------------------------------------------------------------------
+
+if [ -t 2 ] && [ "$NO_COLOR_FLAG" != "1" ]; then
+  C_RESET=$'\033[0m'
+  C_DIM=$'\033[2m'
+  C_BOLD=$'\033[1m'
+  C_RED=$'\033[31m'
+  C_GREEN=$'\033[32m'
+  C_YELLOW=$'\033[33m'
+  C_BLUE=$'\033[34m'
+  C_CYAN=$'\033[36m'
+else
+  C_RESET=""
+  C_DIM=""
+  C_BOLD=""
+  C_RED=""
+  C_GREEN=""
+  C_YELLOW=""
+  C_BLUE=""
+  C_CYAN=""
+fi
+
+timestamp() {
+  date '+%Y-%m-%dT%H:%M:%S%z'
+}
+
+_emit() {
+  local level="$1" color="$2"
+  shift 2
+  printf '%s %s%-5s%s %s\n' "$(timestamp)" "$color" "$level" "$C_RESET" "$*" >&2
+}
+
+log_info()  { _emit INFO  "$C_BLUE"   "$@"; }
+log_ok()    { _emit OK    "$C_GREEN"  "$@"; }
+log_warn()  { _emit WARN  "$C_YELLOW" "$@"; }
+log_error() { _emit ERROR "$C_RED"    "$@"; }
+
+die() {
+  log_error "$@"
+  exit 1
+}
+
+die_usage() {
+  printf '%s: %s\n' "$SCRIPT_NAME" "$*" >&2
+  printf "Run '%s help' for usage.\n" "$SCRIPT_NAME" >&2
   exit 2
 }
 
-cmd_help() {
-  cat <<EOF
-Usage: pagez <subcommand>
-
-Pagez local operations entrypoint (P00 foundation stub).
-
-Subcommands:
-  help       Show this help message
-  doctor     Validate environment (WSL, Node, pnpm, Docker, ports, Git remote, TLS, service health)
-  start      Start required services in background and wait for health checks
-  stop       Gracefully stop services; preserve logs
-  restart    Stop then start
-  status     Show service state, ports, health, version, tunnel state
-  logs       Stream logs (optional service filter, --since)
-  enable     Enable autostart (systemd user services; PM2 fallback)
-  disable    Disable autostart
-  tunnel     Start or inspect Cloudflare Tunnel dev harness
-
-Operational subcommands (doctor, start, stop, restart, status, logs, enable,
-disable, tunnel) are implemented in phase P17 and fail with a
-phase-dependency message until P17 is done.
-EOF
+# Plain stdout lines intended to be read/copied by a human or a script.
+# Kept separate from the log stream so that URLs are never mixed with
+# timestamped noise and remain trivially greppable.
+out() {
+  printf '%s\n' "$*"
 }
 
-cmd_doctor() { fail_phase_dependency doctor; }
-cmd_start() { fail_phase_dependency start; }
-cmd_stop() { fail_phase_dependency stop; }
-cmd_restart() { fail_phase_dependency restart; }
-cmd_status() { fail_phase_dependency status; }
-cmd_logs() { fail_phase_dependency logs; }
-cmd_enable() { fail_phase_dependency enable; }
-cmd_disable() { fail_phase_dependency disable; }
-cmd_tunnel() { fail_phase_dependency tunnel; }
+link_or_plain() {
+  local label="$1" url="$2"
+  if [ "$HYPERLINKS_FLAG" = "1" ] && [ -t 1 ]; then
+    printf '\033]8;%s\033\\%s\033]8;\033\\%s\n' "id=$url" "$label" "$C_RESET"
+  else
+    printf '%s %s\n' "$label" "$url"
+  fi
+}
+
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  printf '%s' "$s"
+}
+
+# ---------------------------------------------------------------------------
+# Section: generic utilities
+# ---------------------------------------------------------------------------
+
+have() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+is_port() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
+ensure_dirs() {
+  mkdir -p "$RUNTIME_DIR" "$LOG_DIR" "$PID_DIR" || return 1
+  [ -d "$RUNTIME_DIR" ] && [ -w "$RUNTIME_DIR" ] || return 1
+  return 0
+}
+
+# Confirms .pagez is Git-ignored so runtime state can never be committed.
+assert_runtime_ignored() {
+  command -v git >/dev/null 2>&1 || return 0
+  ( cd "$REPO_ROOT" && git check-ignore -q "$RUNTIME_DIR" ) 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# Section: toolchain resolution
+# ---------------------------------------------------------------------------
+#
+# The interpreter is resolved in three stages:
+#   1. PATH lookup that ignores aliases and functions (type -P).
+#   2. Ask that binary for its own process.execPath, which penetrates any
+#      wrapper that re-execs a real node.
+#   3. Verify the result is an executable regular file.
+#
+# The directory of the real interpreter is then prepended to PATH. This matters
+# because pnpm, next, and nest are launched through "#!/usr/bin/env node"
+# shebangs, and env performs its own PATH lookup. Without this step a wrapper
+# named "node" earlier in PATH would intercept every child process.
+
+resolve_node_bin() {
+  local candidate real
+
+  candidate="$(type -P node 2>/dev/null || true)"
+  if [ -z "$candidate" ]; then
+    candidate="$(command -v node 2>/dev/null || true)"
+  fi
+
+  if [ -z "$candidate" ]; then
+    return 1
+  fi
+
+  real="$("$candidate" -p 'process.execPath' 2>/dev/null | grep -E '^/' | tail -n 1 || true)"
+
+  if [ -z "$real" ]; then
+    real="$candidate"
+  fi
+
+  if [ ! -x "$real" ] || [ ! -f "$real" ]; then
+    return 1
+  fi
+
+  printf '%s\n' "$real"
+  return 0
+}
+
+resolve_pnpm_bin() {
+  local candidate
+  candidate="$(type -P pnpm 2>/dev/null || true)"
+  if [ -z "$candidate" ]; then
+    candidate="$(command -v pnpm 2>/dev/null || true)"
+  fi
+  [ -n "$candidate" ] && [ -x "$candidate" ] || return 1
+  printf '%s\n' "$candidate"
+  return 0
+}
+
+prepend_path_dir() {
+  local dir="$1"
+  [ -d "$dir" ] || return 0
+  case ":$PATH:" in
+    *":$dir:"*) ;;
+    *) PATH="$dir:$PATH"; export PATH ;;
+  esac
+}
+
+setup_toolchain() {
+  NODE_BIN="$(resolve_node_bin)" || die "node could not be resolved as a real executable binary; install Node.js 22 or set PATH correctly"
+
+  if [ "$BYPASS_MPS_ADMIT" = "1" ]; then
+    prepend_path_dir "$(dirname "$NODE_BIN")"
+  fi
+
+  PNPM_BIN="$(resolve_pnpm_bin)" || die "pnpm could not be resolved as an executable binary; run corepack enable or install pnpm 11"
+  prepend_path_dir "$(dirname "$PNPM_BIN")"
+
+  PROCFS_AVAILABLE=0
+  if [ -d /proc ] && [ -r "/proc/self/stat" ]; then
+    PROCFS_AVAILABLE=1
+  fi
+
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Section: dynamic port allocation
+# ---------------------------------------------------------------------------
+#
+# Binding to port 0 asks the kernel for an unused ephemeral port. The socket is
+# closed immediately, and the caller then starts the real service on that port.
+# Because another process could theoretically claim it in the gap, callers must
+# verify the service afterwards and re-allocate on failure.
+
+allocate_free_port() {
+  local bind_host="$1"
+  local result=""
+  local rc=0
+
+  result="$("$NODE_BIN" -e '
+    const net = require("net");
+    const host = process.argv[1];
+    const server = net.createServer();
+    server.on("error", (err) => {
+      process.stderr.write(String(err && err.code ? err.code : err));
+      process.exit(3);
+    });
+    server.listen(0, host, () => {
+      const info = server.address();
+      server.close(() => {
+        process.stdout.write(String(info.port) + "\n");
+      });
+    });
+  ' "$bind_host" 2>/dev/null)" || rc=$?
+
+  if [ "$rc" -ne 0 ]; then
+    return 1
+  fi
+
+  result="${result%%$'\n'*}"
+  result="$(printf '%s' "$result" | tr -d '[:space:]')"
+
+  if ! is_port "$result"; then
+    return 1
+  fi
+
+  printf '%s\n' "$result"
+  return 0
+}
+
+allocate_port_pair() {
+  local attempt=1
+  local fe be
+
+  while [ "$attempt" -le "$ALLOC_RETRIES" ]; do
+    if [ -n "$FORCED_FRONTEND_PORT" ]; then
+      fe="$FORCED_FRONTEND_PORT"
+    else
+      fe="$(allocate_free_port "$HOST_BIND")" || {
+        log_warn "port allocation probe failed on attempt $attempt"
+        attempt=$((attempt + 1))
+        sleep 1
+        continue
+      }
+    fi
+
+    if [ -n "$FORCED_BACKEND_PORT" ]; then
+      be="$FORCED_BACKEND_PORT"
+    else
+      be="$(allocate_free_port "$HOST_BIND")" || {
+        log_warn "port allocation probe failed on attempt $attempt"
+        attempt=$((attempt + 1))
+        sleep 1
+        continue
+      }
+    fi
+
+    if [ "$fe" = "$be" ]; then
+      log_warn "identical ports allocated ($fe); retrying"
+      attempt=$((attempt + 1))
+      continue
+    fi
+
+    ALLOC_FRONTEND_PORT="$fe"
+    ALLOC_BACKEND_PORT="$be"
+    return 0
+  done
+
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Section: probes
+# ---------------------------------------------------------------------------
+
+probe_tcp() {
+  local host="$1" port="$2" timeout_ms="${3:-2000}"
+
+  "$NODE_BIN" -e '
+    const net = require("net");
+    const host = process.argv[1];
+    const port = Number(process.argv[2]);
+    const timeout = Number(process.argv[3]);
+    const socket = net.createConnection({ host, port });
+    socket.setTimeout(timeout);
+    socket.on("connect", () => { socket.end(); process.exit(0); });
+    socket.on("timeout", () => { socket.destroy(); process.exit(1); });
+    socket.on("error", () => process.exit(1));
+  ' "$host" "$port" "$timeout_ms" >/dev/null 2>&1
+}
+
+probe_http() {
+  local url="$1" timeout_ms="${2:-3000}" allowed="${3:-200,204,301,302,303,304,307,308}"
+
+  "$NODE_BIN" -e '
+    const url = process.argv[1];
+    const timeout = Number(process.argv[2]);
+    const allowed = new Set(
+      String(process.argv[3] || "200")
+        .split(",")
+        .map((v) => Number(v.trim()))
+        .filter((v) => Number.isFinite(v)),
+    );
+    fetch(url, { signal: AbortSignal.timeout(timeout), redirect: "manual" })
+      .then((res) => process.exit(allowed.has(res.status) ? 0 : 2))
+      .catch(() => process.exit(1));
+  ' "$url" "$timeout_ms" "$allowed" >/dev/null 2>&1
+}
+
+frontend_ready() {
+  local port="$1"
+  probe_http "http://127.0.0.1:${port}/" 4000 "200,301,302,303,304,307,308"
+}
+
+backend_ready() {
+  local port="$1"
+  probe_tcp "127.0.0.1" "$port" 2000 || return 1
+
+  if [ -n "$BACKEND_HEALTH_PATH" ]; then
+    probe_http "http://127.0.0.1:${port}${BACKEND_HEALTH_PATH}" 4000 "200,204" || return 1
+  fi
+
+  return 0
+}
+
+wait_for_ready() {
+  local fe_port="$1" be_port="$2" deadline budget elapsed fe_ok be_ok
+
+  deadline=$(( $(date +%s) + START_TIMEOUT ))
+
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    fe_ok=0
+    be_ok=0
+    frontend_ready "$fe_port" || fe_ok=1
+    backend_ready "$be_port" || be_ok=1
+
+    if [ "$fe_ok" -eq 0 ] && [ "$be_ok" -eq 0 ]; then
+      return 0
+    fi
+
+    sleep 2
+  done
+
+  elapsed="$START_TIMEOUT"
+  budget="$START_TIMEOUT"
+  log_warn "readiness not reached within ${elapsed}s (budget ${budget}s)"
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Section: process ownership and termination
+# ---------------------------------------------------------------------------
+#
+# Two independent guards prevent harming foreign processes:
+#   - the PID must be present in a file we wrote under .pagez/pids/
+#   - /proc/<pid>/cmdline must contain REPO_ROOT
+# Only then is a signal sent, and only to the specific tree or group.
+
+read_pid_file() {
+  local file="$1" pid
+  [ -f "$file" ] || return 1
+  pid="$(head -n 1 "$file" 2>/dev/null | tr -d '[:space:]')"
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$pid"
+}
+
+pid_alive() {
+  [ -n "${1:-}" ] || return 1
+  kill -0 "$1" 2>/dev/null
+}
+
+pid_cmdline() {
+  local pid="$1"
+  [ -r "/proc/$pid/cmdline" ] || return 1
+  tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null
+}
+
+pid_is_ours() {
+  local pid="$1" cmd
+  cmd="$(pid_cmdline "$pid" || true)"
+  [ -n "$cmd" ] || return 1
+  case "$cmd" in
+    *"$REPO_ROOT"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+pgid_of() {
+  local pid="$1"
+  ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]' | head -n 1
+}
+
+# Walks the process tree rooted at a PID using /proc/<pid>/stat field 4 (ppid).
+# Returns the root PID first, then all descendants, one per line.
+collect_descendant_tree() {
+  local root="$1"
+  local -a queue=("$root")
+  local -a seen=("$root")
+  local i=0 p child found
+
+  if [ "$PROCFS_AVAILABLE" -ne 1 ]; then
+    printf '%s\n' "$root"
+    return 0
+  fi
+
+  while [ "$i" -lt "${#queue[@]}" ]; do
+    p="${queue[$i]}"
+    i=$((i + 1))
+
+    for child in $(awk -v pp="$p" '$4 == pp { print $1 }' /proc/[0-9]*/stat 2>/dev/null); do
+      found=0
+      case " ${seen[*]} " in
+        *" $child "*) found=1 ;;
+      esac
+      if [ "$found" -eq 0 ]; then
+        seen+=("$child")
+        queue+=("$child")
+      fi
+    done
+  done
+
+  printf '%s\n' "${queue[@]}"
+  return 0
+}
+
+signal_tree() {
+  local root="$1" sig="$2" pid
+  local -a tree=()
+
+  if [ "$PROCFS_AVAILABLE" -eq 1 ]; then
+    mapfile -t tree < <(collect_descendant_tree "$root")
+  else
+    tree=("$root")
+  fi
+
+  for pid in "${tree[@]}"; do
+    [ -n "$pid" ] || continue
+    pid_is_ours "$pid" || continue
+    kill -"$sig" "$pid" 2>/dev/null || true
+  done
+
+  return 0
+}
+
+signal_group() {
+  local pgid="$1" sig="$2"
+  [ -n "$pgid" ] || return 0
+  kill -"$sig" -- "-$pgid" 2>/dev/null || true
+}
+
+wait_pid_gone() {
+  local pid="$1" timeout="$2" waited=0
+  while pid_alive "$pid"; do
+    [ "$waited" -ge "$timeout" ] && return 1
+    sleep 1
+    waited=$((waited + 1))
+  done
+  return 0
+}
+
+terminate_recorded_process() {
+  local name="$1" pid="$2"
+  local pgid
+
+  [ -n "$pid" ] || return 0
+
+  if ! pid_alive "$pid"; then
+    rm -f "$PID_DIR/$name.pid"
+    return 0
+  fi
+
+  if ! pid_is_ours "$pid"; then
+    log_warn "$name PID $pid is alive but is not a Pagez process; refusing to signal it"
+    return 0
+  fi
+
+  pgid="$(pgid_of "$pid" || true)"
+
+  signal_tree "$pid" TERM
+  [ -n "$pgid" ] && signal_group "$pgid" TERM
+
+  if wait_pid_gone "$pid" "$STOP_TIMEOUT"; then
+    log_info "$name stopped gracefully (pid $pid)"
+  else
+    log_warn "$name did not stop within ${STOP_TIMEOUT}s; sending SIGKILL"
+    signal_tree "$pid" KILL
+    [ -n "$pgid" ] && signal_group "$pgid" KILL
+    wait_pid_gone "$pid" 5 || true
+  fi
+
+  rm -f "$PID_DIR/$name.pid"
+  return 0
+}
+
+sweep_orphans() {
+  local pid cmd killed=0
+
+  [ "$PROCFS_AVAILABLE" -eq 1 ] || {
+    log_warn "orphan sweep requires /proc which is unavailable here"
+    return 0
+  }
+
+  for pid in /proc/[0-9]*; do
+    pid="${pid#/proc/}"
+    [ -r "/proc/$pid/cmdline" ] || continue
+    cmd="$(pid_cmdline "$pid" || true)"
+    [ -n "$cmd" ] || continue
+
+    case "$cmd" in
+      *"$REPO_ROOT"*) ;;
+      *) continue ;;
+    esac
+
+    case "$cmd" in
+      *"next dev"*|*"next start"*|*"nest start"*|*"dist/main.js"*|*"scripts/pagez"*) ;;
+      *) continue ;;
+    esac
+
+    case "$cmd" in
+      *"$$"*|*"scripts/pagez help"*|*"scripts/pagez status"*|*"scripts/pagez doctor"*|*"scripts/pagez logs"*) continue ;;
+    esac
+
+    kill -TERM "$pid" 2>/dev/null && killed=$((killed + 1))
+  done
+
+  if [ "$killed" -gt 0 ]; then
+    sleep 2
+    log_info "orphan sweep signalled $killed Pagez-owned process(es)"
+  fi
+
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Section: runtime state file
+# ---------------------------------------------------------------------------
+
+write_ports_file() {
+  local fe="$1" be="$2" tmp
+  tmp="${PORTS_FILE}.tmp.$$"
+
+  {
+    printf '# Pagez runtime port state. Generated by scripts/pagez. Do not edit.\n'
+    printf '# Deleting this file is safe; it is recreated on every start.\n'
+    printf 'PAGEZ_GENERATED_AT=%s\n' "$(timestamp)"
+    printf 'PAGEZ_REPO_ROOT=%s\n' "$REPO_ROOT"
+    printf 'PAGEZ_MODE=%s\n' "$MODE"
+    printf 'PAGEZ_BIND_HOST=%s\n' "$HOST_BIND"
+    printf 'PAGEZ_PUBLIC_HOST=%s\n' "$PUBLIC_HOST"
+    printf 'PAGEZ_FRONTEND_PORT=%s\n' "$fe"
+    printf 'PAGEZ_BACKEND_PORT=%s\n' "$be"
+    printf 'PAGEZ_UI_URL=http://%s:%s\n' "$PUBLIC_HOST" "$fe"
+    printf 'PAGEZ_API_URL=http://%s:%s\n' "$PUBLIC_HOST" "$be"
+  } > "$tmp"
+
+  mv -f "$tmp" "$PORTS_FILE"
+}
+
+state_field() {
+  local key="$1" file="${2:-$PORTS_FILE}"
+  [ -f "$file" ] || return 1
+  sed -n "s/^${key}=\\(.*\\)\$/\\1/p" "$file" 2>/dev/null | tail -n 1
+}
+
+load_state() {
+  STATE_FRONTEND_PORT=""
+  STATE_BACKEND_PORT=""
+  STATE_MODE=""
+  STATE_BIND_HOST=""
+  STATE_PUBLIC_HOST=""
+  STATE_UI_URL=""
+  STATE_API_URL=""
+  STATE_GENERATED_AT=""
+
+  [ -f "$PORTS_FILE" ] || return 1
+
+  STATE_FRONTEND_PORT="$(state_field PAGEZ_FRONTEND_PORT || true)"
+  STATE_BACKEND_PORT="$(state_field PAGEZ_BACKEND_PORT || true)"
+  STATE_MODE="$(state_field PAGEZ_MODE || true)"
+  STATE_BIND_HOST="$(state_field PAGEZ_BIND_HOST || true)"
+  STATE_PUBLIC_HOST="$(state_field PAGEZ_PUBLIC_HOST || true)"
+  STATE_UI_URL="$(state_field PAGEZ_UI_URL || true)"
+  STATE_API_URL="$(state_field PAGEZ_API_URL || true)"
+  STATE_GENERATED_AT="$(state_field PAGEZ_GENERATED_AT || true)"
+
+  is_port "${STATE_FRONTEND_PORT:-}" || return 1
+  is_port "${STATE_BACKEND_PORT:-}" || return 1
+
+  return 0
+}
+
+clear_state() {
+  rm -f "$PORTS_FILE" "$PORTS_FILE".tmp.* 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# Section: network URL discovery
+# ---------------------------------------------------------------------------
+#
+# The LAN URL is best-effort. It prefers the address on the default-route
+# interface, because that is the address reachable from the host network. It
+# deliberately skips Docker bridge addresses (172.16-31.x) and the loopback.
+
+detect_network_host() {
+  [ -n "$NETWORK_HOST_OVERRIDE" ] && {
+    printf '%s\n' "$NETWORK_HOST_OVERRIDE"
+    return 0
+  }
+
+  have ip || return 1
+
+  local iface addr
+  iface="$(ip -4 route show default 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i+1); exit } }')"
+  [ -n "$iface" ] || return 1
+
+  addr="$(ip -4 -o addr show dev "$iface" 2>/dev/null | awk '{ print $4 }' | cut -d/ -f1 | head -n 1)"
+  [ -n "$addr" ] || return 1
+
+  case "$addr" in
+    172.*|127.*|169.254.*) return 1 ;;
+  esac
+
+  printf '%s\n' "$addr"
+  return 0
+}
+
+ui_urls() {
+  local port="$1" net
+  printf 'http://%s:%s\n' "$PUBLIC_HOST" "$port"
+  printf 'http://127.0.0.1:%s\n' "$port"
+  net="$(detect_network_host || true)"
+  [ -n "$net" ] && printf 'http://%s:%s\n' "$net" "$port"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Section: manager detection
+# ---------------------------------------------------------------------------
+
+systemd_available() {
+  have systemctl || return 1
+  systemctl --user is-system-running >/dev/null 2>&1 && return 0
+  systemctl --user status >/dev/null 2>&1 && return 0
+  return 1
+}
+
+systemd_unit_installed() {
+  systemd_available || return 1
+  [ -f "$UNIT_DIR_DEFAULT/$UNIT_NAME" ] && return 0
+  systemctl --user cat "$UNIT_NAME" >/dev/null 2>&1 && return 0
+  return 1
+}
+
+systemd_unit_enabled() {
+  systemd_available || return 1
+  systemctl --user is-enabled "$UNIT_NAME" >/dev/null 2>&1
+}
+
+systemd_unit_active() {
+  systemd_available || return 1
+  [ "$(systemctl --user is-active "$UNIT_NAME" 2>/dev/null || true)" = "active" ]
+}
+
+systemd_main_pid() {
+  systemd_available || return 1
+  local pid
+  pid="$(systemctl --user show -p MainPID --value "$UNIT_NAME" 2>/dev/null || true)"
+  case "$pid" in
+    ''|0|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$pid"
+}
+
+current_manager() {
+  if systemd_unit_active; then
+    printf 'systemd-user\n'
+    return 0
+  fi
+
+  local spid
+  spid="$(read_pid_file "$SUPERVISOR_PID_FILE" 2>/dev/null || true)"
+  if [ -n "$spid" ] && pid_alive "$spid"; then
+    printf 'supervisor\n'
+    return 0
+  fi
+
+  printf 'none\n'
+  return 1
+}
+
+running_supervisor_pid() {
+  local pid
+  if systemd_unit_active; then
+    systemd_main_pid || return 1
+    return 0
+  fi
+
+  pid="$(read_pid_file "$SUPERVISOR_PID_FILE" 2>/dev/null || true)"
+  [ -n "$pid" ] || return 1
+  pid_alive "$pid" || return 1
+  printf '%s\n' "$pid"
+}
+
+# ---------------------------------------------------------------------------
+# Section: lock
+# ---------------------------------------------------------------------------
+#
+# An atomic mkdir is used instead of flock so that the script works on minimal
+# images where util-linux is absent. A lock whose recorded owner is dead is
+# treated as stale and reclaimed exactly once.
+
+lock_acquire_or_fail() {
+  local owner waited=0
+
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    printf '%s\n' "$$" > "$LOCK_DIR/pid"
+    return 0
+  fi
+
+  owner="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+
+  if [ -n "$owner" ] && ! pid_alive "$owner"; then
+    log_warn "reclaiming stale lock owned by dead PID $owner"
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+      printf '%s\n' "$$" > "$LOCK_DIR/pid"
+      return 0
+    fi
+  fi
+
+  while [ "$waited" -lt 25 ]; do
+    sleep 0.2
+    waited=$((waited + 1))
+    owner="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+    if [ -n "$owner" ] && ! pid_alive "$owner"; then
+      rm -rf "$LOCK_DIR" 2>/dev/null || true
+      if mkdir "$LOCK_DIR" 2>/dev/null; then
+        printf '%s\n' "$$" > "$LOCK_DIR/pid"
+        return 0
+      fi
+    fi
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+      printf '%s\n' "$$" > "$LOCK_DIR/pid"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+lock_release() {
+  local owner
+  owner="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+  if [ "$owner" = "$$" ] || [ -z "$owner" ]; then
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Section: build (prod mode)
+# ---------------------------------------------------------------------------
+
+run_builds() {
+  [ "$MODE" = "prod" ] || return 0
+  [ "$SKIP_BUILD" = "1" ] && {
+    log_info "PAGEZ_SKIP_BUILD=1; skipping production builds"
+    return 0
+  }
+
+  log_info "building frontend for production"
+  ( cd "$REPO_ROOT" && NEXT_TELEMETRY_DISABLED=1 "$PNPM_BIN" --filter frontend build ) \
+    >> "$SUPERVISOR_LOG" 2>&1 || return 1
+
+  log_info "building backend for production"
+  ( cd "$REPO_ROOT" && NEXT_TELEMETRY_DISABLED=1 "$PNPM_BIN" --filter backend build ) \
+    >> "$SUPERVISOR_LOG" 2>&1 || return 1
+
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Section: child launchers
+# ---------------------------------------------------------------------------
+#
+# Children are launched with exec inside a subshell so the recorded PID is the
+# package manager process, and they inherit the supervisor's process group.
+# That combination lets termination work at three levels: targeted tree kill,
+# process-group kill, and (under systemd) control-group kill.
+
+launch_frontend() {
+  local port="$1"
+  : > "$FRONTEND_LOG"
+
+  if [ "$MODE" = "prod" ]; then
+    (
+      cd "$REPO_ROOT/frontend" || exit 1
+      export PORT="$port"
+      export HOST="$HOST_BIND"
+      export NODE_ENV=production
+      export NEXT_TELEMETRY_DISABLED=1
+      exec "$PNPM_BIN" exec next start -p "$port" -H "$HOST_BIND"
+    ) >> "$FRONTEND_LOG" 2>&1 < /dev/null &
+  else
+    (
+      cd "$REPO_ROOT/frontend" || exit 1
+      export PORT="$port"
+      export HOST="$HOST_BIND"
+      export NEXT_TELEMETRY_DISABLED=1
+      exec "$PNPM_BIN" exec next dev -p "$port" -H "$HOST_BIND"
+    ) >> "$FRONTEND_LOG" 2>&1 < /dev/null &
+  fi
+
+  LAUNCHED_FRONTEND_PID=$!
+  printf '%s\n' "$LAUNCHED_FRONTEND_PID" > "$FRONTEND_PID_FILE"
+}
+
+launch_backend() {
+  local port="$1"
+  : > "$BACKEND_LOG"
+
+  if [ "$MODE" = "prod" ]; then
+    (
+      cd "$REPO_ROOT/backend" || exit 1
+      export PORT="$port"
+      export HOST="$HOST_BIND"
+      export NODE_ENV=production
+      exec "$NODE_BIN" dist/main.js
+    ) >> "$BACKEND_LOG" 2>&1 < /dev/null &
+  else
+    (
+      cd "$REPO_ROOT/backend" || exit 1
+      export PORT="$port"
+      export HOST="$HOST_BIND"
+      export NODE_ENV=development
+      exec "$PNPM_BIN" exec nest start --watch
+    ) >> "$BACKEND_LOG" 2>&1 < /dev/null &
+  fi
+
+  LAUNCHED_BACKEND_PID=$!
+  printf '%s\n' "$LAUNCHED_BACKEND_PID" > "$BACKEND_PID_FILE"
+}
+
+# ---------------------------------------------------------------------------
+# Section: internal supervisor (_run)
+# ---------------------------------------------------------------------------
+
+SHUTDOWN_REQUESTED=0
+RUN_FRONTEND_PID=""
+RUN_BACKEND_PID=""
+
+run_shutdown() {
+  [ "$SHUTTING_DOWN_FLAG" = "1" ] && return 0
+  SHUTTING_DOWN_FLAG=1
+
+  trap - TERM INT HUP
+
+  printf '%s INFO  supervisor shutting down (reason: %s)\n' "$(timestamp)" "${SHUTDOWN_REASON:-signal}" >> "$SUPERVISOR_LOG"
+
+  if [ -n "$RUN_BACKEND_PID" ]; then
+    terminate_recorded_process backend "$RUN_BACKEND_PID"
+  fi
+  if [ -n "$RUN_FRONTEND_PID" ]; then
+    terminate_recorded_process frontend "$RUN_FRONTEND_PID"
+  fi
+
+  rm -f "$SUPERVISOR_PID_FILE"
+  clear_state
+  lock_release
+
+  printf '%s OK    supervisor exited\n' "$(timestamp)" >> "$SUPERVISOR_LOG"
+  return 0
+}
+
+cmd_run() {
+  SHUTTING_DOWN_FLAG=0
+  SHUTDOWN_REASON="signal"
+
+  setup_toolchain
+  ensure_dirs || die "unable to create runtime directory $RUNTIME_DIR"
+  assert_runtime_ignored || log_warn "$RUNTIME_DIR is not Git-ignored; add .pagez/ to .gitignore"
+
+  if ! lock_acquire_or_fail; then
+    printf '%s ERROR another pagez supervisor holds the lock\n' "$(timestamp)" >> "$SUPERVISOR_LOG"
+    exit 1
+  fi
+
+  printf '%s\n' "$$" > "$SUPERVISOR_PID_FILE"
+  : > "$SUPERVISOR_LOG"
+  printf '%s INFO  supervisor started pid=%s mode=%s repo=%s\n' "$(timestamp)" "$$" "$MODE" "$REPO_ROOT" >> "$SUPERVISOR_LOG"
+  printf '%s INFO  node=%s pnpm=%s\n' "$(timestamp)" "$NODE_BIN" "$PNPM_BIN" >> "$SUPERVISOR_LOG"
+
+  trap 'SHUTDOWN_REQUESTED=1; SHUTDOWN_REASON=signal; run_shutdown; exit 0' TERM INT HUP
+  trap 'run_shutdown' EXIT
+
+  if ! allocate_port_pair; then
+    printf '%s ERROR could not allocate two distinct free ports\n' "$(timestamp)" >> "$SUPERVISOR_LOG"
+    exit 1
+  fi
+
+  printf '%s INFO  allocated frontend=%s backend=%s bind=%s\n' \
+    "$(timestamp)" "$ALLOC_FRONTEND_PORT" "$ALLOC_BACKEND_PORT" "$HOST_BIND" >> "$SUPERVISOR_LOG"
+
+  write_ports_file "$ALLOC_FRONTEND_PORT" "$ALLOC_BACKEND_PORT"
+
+  if ! run_builds; then
+    printf '%s ERROR production build failed\n' "$(timestamp)" >> "$SUPERVISOR_LOG"
+    exit 1
+  fi
+
+  launch_backend "$ALLOC_BACKEND_PORT"
+  launch_frontend "$ALLOC_FRONTEND_PORT"
+
+  RUN_BACKEND_PID="$LAUNCHED_BACKEND_PID"
+  RUN_FRONTEND_PID="$LAUNCHED_FRONTEND_PID"
+
+  printf '%s INFO  launched backend pid=%s port=%s\n' "$(timestamp)" "$RUN_BACKEND_PID" "$ALLOC_BACKEND_PORT" >> "$SUPERVISOR_LOG"
+  printf '%s INFO  launched frontend pid=%s port=%s\n' "$(timestamp)" "$RUN_FRONTEND_PID" "$ALLOC_FRONTEND_PORT" >> "$SUPERVISOR_LOG"
+
+  if ! wait_for_ready "$ALLOC_FRONTEND_PORT" "$ALLOC_BACKEND_PORT"; then
+    printf '%s ERROR readiness timeout; recent frontend log:\n' "$(timestamp)" >> "$SUPERVISOR_LOG"
+    tail -n 40 "$FRONTEND_LOG" >> "$SUPERVISOR_LOG" 2>&1 || true
+    printf '%s ERROR recent backend log:\n' "$(timestamp)" >> "$SUPERVISOR_LOG"
+    tail -n 40 "$BACKEND_LOG" >> "$SUPERVISOR_LOG" 2>&1 || true
+    exit 1
+  fi
+
+  printf '%s OK    healthy frontend=http://%s:%s api=http://%s:%s\n' \
+    "$(timestamp)" "$PUBLIC_HOST" "$ALLOC_FRONTEND_PORT" "$PUBLIC_HOST" "$ALLOC_BACKEND_PORT" >> "$SUPERVISOR_LOG"
+
+  while [ "$SHUTDOWN_REQUESTED" -eq 0 ]; do
+    if ! pid_alive "$RUN_FRONTEND_PID"; then
+      printf '%s ERROR frontend exited unexpectedly\n' "$(timestamp)" >> "$SUPERVISOR_LOG"
+      SHUTDOWN_REASON="frontend-exit"
+      run_shutdown
+      exit 1
+    fi
+    if ! pid_alive "$RUN_BACKEND_PID"; then
+      printf '%s ERROR backend exited unexpectedly\n' "$(timestamp)" >> "$SUPERVISOR_LOG"
+      SHUTDOWN_REASON="backend-exit"
+      run_shutdown
+      exit 1
+    fi
+    sleep 2
+  done
+
+  run_shutdown
+  exit 0
+}
+
+# ---------------------------------------------------------------------------
+# Section: start
+# ---------------------------------------------------------------------------
+
+parse_start_args() {
+  WAIT_FOR_HEALTH=1
+  OPEN_BROWSER=0
+  START_MODE_OVERRIDE=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --no-wait) WAIT_FOR_HEALTH=0 ;;
+      --open) OPEN_BROWSER=1 ;;
+      --dev) START_MODE_OVERRIDE="dev" ;;
+      --prod) START_MODE_OVERRIDE="prod" ;;
+      --mode) shift; [ $# -gt 0 ] || die_usage "--mode requires dev|prod"; START_MODE_OVERRIDE="$1" ;;
+      --mode=*) START_MODE_OVERRIDE="${1#*=}" ;;
+      --timeout) shift; [ $# -gt 0 ] || die_usage "--timeout requires seconds"; START_TIMEOUT="$1" ;;
+      -h|--help) cmd_help; exit 0 ;;
+      *) die_usage "unknown start option: $1" ;;
+    esac
+    shift
+  done
+
+  if [ -n "$START_MODE_OVERRIDE" ]; then
+    case "$START_MODE_OVERRIDE" in
+      dev|prod) MODE="$START_MODE_OVERRIDE" ;;
+      *) die_usage "--mode must be dev or prod" ;;
+    esac
+    if [ -z "${PAGEZ_START_TIMEOUT:-}" ]; then
+      case "$MODE" in
+        prod) START_TIMEOUT=60 ;;
+        *) START_TIMEOUT=120 ;;
+      esac
+    fi
+  fi
+}
+
+open_browser() {
+  local url="$1" opener
+  for opener in wslview sensible-browser xdg-open open; do
+    if have "$opener"; then
+      "$opener" "$url" >/dev/null 2>&1 && return 0
+    fi
+  done
+  return 1
+}
+
+print_started_banner() {
+  local fe="$1" be="$2" net url
+  out ""
+  out "${C_BOLD}Pagez is running${C_RESET}"
+  out "  mode:      $MODE"
+  out "  bind host: $HOST_BIND"
+  out ""
+  out "${C_BOLD}Web UI${C_RESET}"
+  while IFS= read -r url; do
+    [ -n "$url" ] || continue
+    out "  $url"
+  done < <(ui_urls "$fe")
+  out ""
+  out "${C_BOLD}API${C_RESET}"
+  out "  http://$PUBLIC_HOST:$be"
+  out "  http://127.0.0.1:$be"
+  net="$(detect_network_host || true)"
+  [ -n "$net" ] && out "  http://$net:$be"
+  out ""
+  out "  logs:    $SCRIPT_NAME logs"
+  out "  status:  $SCRIPT_NAME status"
+  out "  stop:    $SCRIPT_NAME stop"
+  out ""
+}
+
+cmd_start() {
+  parse_start_args "$@"
+
+  setup_toolchain
+  ensure_dirs || die "unable to create runtime directory $RUNTIME_DIR"
+
+  if ! assert_runtime_ignored; then
+    log_warn "$RUNTIME_DIR is not Git-ignored; runtime state could be committed. Add .pagez/ to .gitignore."
+  fi
+
+  if systemd_unit_active; then
+    if load_state; then
+      log_info "Pagez is already running under systemd user service $UNIT_NAME"
+      out ""
+      out "${C_BOLD}Web UI${C_RESET}"
+      out "  http://$PUBLIC_HOST:${STATE_FRONTEND_PORT}"
+      out "  http://127.0.0.1:${STATE_FRONTEND_PORT}"
+      out ""
+      out "Use '$SCRIPT_NAME restart' to restart, or: systemctl --user restart $UNIT_NAME"
+      return 0
+    fi
+    die "systemd service $UNIT_NAME is active but no port state exists; run: systemctl --user restart $UNIT_NAME"
+  fi
+
+  if spid="$(running_supervisor_pid)"; then
+    if load_state; then
+      log_info "Pagez is already running (supervisor pid $spid)"
+      out ""
+      out "${C_BOLD}Web UI${C_RESET}"
+      out "  http://$PUBLIC_HOST:${STATE_FRONTEND_PORT}"
+      out "  http://127.0.0.1:${STATE_FRONTEND_PORT}"
+      out ""
+      return 0
+    fi
+    log_warn "supervisor pid $spid is alive but no port state exists; restarting cleanly"
+    cmd_stop --quiet || true
+  else
+    if [ -f "$SUPERVISOR_PID_FILE" ]; then
+      log_warn "removing stale supervisor pid file"
+      rm -f "$SUPERVISOR_PID_FILE"
+    fi
+    if [ -d "$LOCK_DIR" ]; then
+      local owner
+      owner="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+      if [ -z "$owner" ] || ! pid_alive "$owner"; then
+        log_warn "removing stale lock directory"
+        rm -rf "$LOCK_DIR" 2>/dev/null || true
+      fi
+    fi
+  fi
+
+  log_info "starting Pagez (mode=$MODE, bind=$HOST_BIND, timeout=${START_TIMEOUT}s)"
+
+  local launcher=( "$SELF_PATH" "$SUPERVISOR_ARG" )
+  local env_prefix=( )
+
+  env_prefix+=( "PAGEZ_MODE=$MODE" )
+  env_prefix+=( "PAGEZ_HOST=$HOST_BIND" )
+  env_prefix+=( "PAGEZ_PUBLIC_HOST=$PUBLIC_HOST" )
+  env_prefix+=( "PAGEZ_START_TIMEOUT=$START_TIMEOUT" )
+  env_prefix+=( "PAGEZ_STOP_TIMEOUT=$STOP_TIMEOUT" )
+  env_prefix+=( "PAGEZ_ALLOC_RETRIES=$ALLOC_RETRIES" )
+  env_prefix+=( "PAGEZ_SKIP_BUILD=$SKIP_BUILD" )
+  env_prefix+=( "PAGEZ_BYPASS_MPS_ADMIT=$BYPASS_MPS_ADMIT" )
+  env_prefix+=( "PAGEZ_RUNTIME_DIR=$RUNTIME_DIR" )
+  [ -n "$FORCED_FRONTEND_PORT" ] && env_prefix+=( "PAGEZ_FRONTEND_PORT=$FORCED_FRONTEND_PORT" )
+  [ -n "$FORCED_BACKEND_PORT" ] && env_prefix+=( "PAGEZ_BACKEND_PORT=$FORCED_BACKEND_PORT" )
+  [ -n "$BACKEND_HEALTH_PATH" ] && env_prefix+=( "PAGEZ_BACKEND_HEALTH_PATH=$BACKEND_HEALTH_PATH" )
+
+  if have setsid; then
+    (
+      cd "$REPO_ROOT" || exit 1
+      setsid env "${env_prefix[@]}" "${launcher[@]}" >> "$SUPERVISOR_LOG" 2>&1 < /dev/null &
+    )
+  else
+    log_warn "setsid not available; using nohup (process group isolation reduced)"
+    (
+      cd "$REPO_ROOT" || exit 1
+      nohup env "${env_prefix[@]}" "${launcher[@]}" >> "$SUPERVISOR_LOG" 2>&1 < /dev/null &
+    )
+  fi
+
+  if [ "$WAIT_FOR_HEALTH" -eq 0 ]; then
+    log_ok "supervisor launched; not waiting for health"
+    out "  follow progress with: $SCRIPT_NAME logs --service supervisor"
+    return 0
+  fi
+
+  local deadline=$(( $(date +%s) + START_TIMEOUT ))
+  local fe="" be="" spid2=""
+
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    spid2="$(read_pid_file "$SUPERVISOR_PID_FILE" 2>/dev/null || true)"
+    if load_state; then
+      fe="${STATE_FRONTEND_PORT}"
+      be="${STATE_BACKEND_PORT}"
+      break
+    fi
+    if [ -n "$spid2" ] && ! pid_alive "$spid2"; then
+      break
+    fi
+    sleep 1
+  done
+
+  if [ -z "$fe" ] || [ -z "$be" ]; then
+    log_error "supervisor did not publish port state within ${START_TIMEOUT}s"
+    out ""
+    out "Recent supervisor log:"
+    tail -n 30 "$SUPERVISOR_LOG" 2>/dev/null || out "  (no supervisor log at $SUPERVISOR_LOG)"
+    out ""
+    out "Recent frontend log:"
+    tail -n 20 "$FRONTEND_LOG" 2>/dev/null || true
+    out ""
+    out "Recent backend log:"
+    tail -n 20 "$BACKEND_LOG" 2>/dev/null || true
+    return 1
+  fi
+
+  local health_deadline=$(( $(date +%s) + START_TIMEOUT ))
+  while [ "$(date +%s)" -lt "$health_deadline" ]; do
+    if frontend_ready "$fe" && backend_ready "$be"; then
+      break
+    fi
+    spid2="$(read_pid_file "$SUPERVISOR_PID_FILE" 2>/dev/null || true)"
+    if [ -n "$spid2" ] && ! pid_alive "$spid2"; then
+      log_error "supervisor exited before becoming healthy"
+      tail -n 30 "$SUPERVISOR_LOG" 2>/dev/null || true
+      return 1
+    fi
+    sleep 2
+  done
+
+  if ! frontend_ready "$fe"; then
+    log_error "frontend is not answering on port $fe"
+    tail -n 30 "$FRONTEND_LOG" 2>/dev/null || true
+    return 1
+  fi
+
+  if ! backend_ready "$be"; then
+    log_error "backend is not accepting connections on port $be"
+    tail -n 30 "$BACKEND_LOG" 2>/dev/null || true
+    return 1
+  fi
+
+  log_ok "Pagez healthy"
+  print_started_banner "$fe" "$be"
+
+  if [ "$OPEN_BROWSER" -eq 1 ]; then
+    if open_browser "http://$PUBLIC_HOST:$fe"; then
+      log_info "opened browser"
+    else
+      log_warn "no browser opener available; open the URL manually"
+    fi
+  fi
+
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Section: stop
+# ---------------------------------------------------------------------------
+
+cmd_stop() {
+  QUIET=0
+  FORCE_ORPHANS=0
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --quiet|-q) QUIET=1 ;;
+      --force) FORCE_ORPHANS=1 ;;
+      -h|--help) cmd_help; exit 0 ;;
+      *) die_usage "unknown stop option: $1" ;;
+    esac
+    shift
+  done
+
+  _say() { [ "$QUIET" -eq 1 ] || log_info "$@"; }
+
+  if systemd_unit_active; then
+    _say "stopping systemd user service $UNIT_NAME"
+    systemctl --user stop "$UNIT_NAME" || {
+      log_error "systemctl --user stop failed"
+      return 1
+    }
+    clear_state
+    _say "stopped"
+    return 0
+  fi
+
+  local spid fpid bpid tpid
+  spid="$(read_pid_file "$SUPERVISOR_PID_FILE" 2>/dev/null || true)"
+  fpid="$(read_pid_file "$FRONTEND_PID_FILE" 2>/dev/null || true)"
+  bpid="$(read_pid_file "$BACKEND_PID_FILE" 2>/dev/null || true)"
+  tpid="$(read_pid_file "$TUNNEL_PID_FILE" 2>/dev/null || true)"
+
+  if [ -n "$tpid" ] && pid_alive "$tpid"; then
+    _say "stopping tunnel (pid $tpid)"
+    terminate_recorded_process tunnel "$tpid"
+  fi
+
+  if [ -n "$spid" ] && pid_alive "$spid"; then
+    _say "stopping supervisor (pid $spid)"
+    terminate_recorded_process supervisor "$spid"
+  else
+    [ -n "$spid" ] && _say "supervisor pid $spid is not alive; cleaning pid file"
+    rm -f "$SUPERVISOR_PID_FILE"
+  fi
+
+  if [ -n "$fpid" ] && pid_alive "$fpid"; then
+    _say "stopping leftover frontend (pid $fpid)"
+    terminate_recorded_process frontend "$fpid"
+  fi
+
+  if [ -n "$bpid" ] && pid_alive "$bpid"; then
+    _say "stopping leftover backend (pid $bpid)"
+    terminate_recorded_process backend "$bpid"
+  fi
+
+  if [ "$FORCE_ORPHANS" -eq 1 ]; then
+    _say "running orphan sweep"
+    sweep_orphans
+  fi
+
+  clear_state
+  rm -rf "$LOCK_DIR" 2>/dev/null || true
+
+  _say "Pagez stopped; logs preserved under $LOG_DIR"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Section: restart
+# ---------------------------------------------------------------------------
+
+cmd_restart() {
+  local preserved_mode="$MODE"
+  cmd_stop "$@" || true
+  MODE="$preserved_mode"
+  cmd_start "$@"
+}
+
+# ---------------------------------------------------------------------------
+# Section: status
+# ---------------------------------------------------------------------------
+
+uptime_from_generated_at() {
+  local gen="$1" start_epoch now_epoch delta
+  [ -n "$gen" ] || { printf 'unknown\n'; return 0; }
+  start_epoch="$(date -d "$gen" +%s 2>/dev/null || true)"
+  [ -n "$start_epoch" ] || { printf 'unknown\n'; return 0; }
+  now_epoch="$(date +%s)"
+  delta=$(( now_epoch - start_epoch ))
+  [ "$delta" -lt 0 ] && delta=0
+  printf '%dh%02dm%02ds\n' $((delta / 3600)) $(( (delta % 3600) / 60 )) $((delta % 60))
+}
+
+cmd_status() {
+  AS_JSON=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json) AS_JSON=1 ;;
+      -h|--help) cmd_help; exit 0 ;;
+      *) die_usage "unknown status option: $1" ;;
+    esac
+    shift
+  done
+
+  local manager state spid fpid bpid tpid
+  manager="$(current_manager || printf 'none')"
+
+  if [ "$manager" = "none" ]; then
+    state="stopped"
+    spid=""
+  else
+    state="running"
+    spid="$(running_supervisor_pid 2>/dev/null || true)"
+  fi
+
+  local fe="" be="" smode="$MODE" sbind="$HOST_BIND" spub="$PUBLIC_HOST" gen=""
+  if load_state; then
+    fe="$STATE_FRONTEND_PORT"
+    be="$STATE_BACKEND_PORT"
+    smode="${STATE_MODE:-$MODE}"
+    sbind="${STATE_BIND_HOST:-$HOST_BIND}"
+    spub="${STATE_PUBLIC_HOST:-$PUBLIC_HOST}"
+    gen="${STATE_GENERATED_AT:-}"
+  fi
+
+  fpid="$(read_pid_file "$FRONTEND_PID_FILE" 2>/dev/null || true)"
+  bpid="$(read_pid_file "$BACKEND_PID_FILE" 2>/dev/null || true)"
+  tpid="$(read_pid_file "$TUNNEL_PID_FILE" 2>/dev/null || true)"
+
+  local fe_health="unknown" be_health="unknown" ui_url="" api_url="" net_host=""
+  net_host="$(detect_network_host || true)"
+
+  if [ -n "$fe" ]; then
+    ui_url="http://$spub:$fe"
+    if [ "$state" = "running" ]; then
+      if frontend_ready "$fe"; then fe_health="ok"; else fe_health="down"; fi
+    fi
+  fi
+
+  if [ -n "$be" ]; then
+    api_url="http://$spub:$be"
+    if [ "$state" = "running" ]; then
+      if backend_ready "$be"; then be_health="ok"; else be_health="down"; fi
+    fi
+  fi
+
+  local uptime="n/a"
+  [ "$state" = "running" ] && uptime="$(uptime_from_generated_at "$gen")"
+
+  local systemd_installed="no" systemd_enabled="no"
+  systemd_unit_installed && systemd_installed="yes"
+  systemd_unit_enabled && systemd_enabled="yes"
+
+  if [ "$AS_JSON" -eq 1 ]; then
+    printf '{\n'
+    printf '  "manager": "%s",\n' "$(json_escape "$manager")"
+    printf '  "state": "%s",\n' "$(json_escape "$state")"
+    printf '  "mode": "%s",\n' "$(json_escape "$smode")"
+    printf '  "repoRoot": "%s",\n' "$(json_escape "$REPO_ROOT")"
+    printf '  "runtimeDir": "%s",\n' "$(json_escape "$RUNTIME_DIR")"
+    printf '  "bindHost": "%s",\n' "$(json_escape "$sbind")"
+    printf '  "publicHost": "%s",\n' "$(json_escape "$spub")"
+    printf '  "networkHost": "%s",\n' "$(json_escape "${net_host:-}")"
+    printf '  "uptime": "%s",\n' "$(json_escape "$uptime")"
+    printf '  "generatedAt": "%s",\n' "$(json_escape "${gen:-}")"
+    printf '  "supervisorPid": "%s",\n' "$(json_escape "${spid:-}")"
+    printf '  "frontendPid": "%s",\n' "$(json_escape "${fpid:-}")"
+    printf '  "backendPid": "%s",\n' "$(json_escape "${bpid:-}")"
+    printf '  "tunnelPid": "%s",\n' "$(json_escape "${tpid:-}")"
+    printf '  "frontendPort": "%s",\n' "$(json_escape "${fe:-}")"
+    printf '  "backendPort": "%s",\n' "$(json_escape "${be:-}")"
+    printf '  "frontendHealth": "%s",\n' "$(json_escape "$fe_health")"
+    printf '  "backendHealth": "%s",\n' "$(json_escape "$be_health")"
+    printf '  "uiUrl": "%s",\n' "$(json_escape "${ui_url:-}")"
+    printf '  "apiUrl": "%s",\n' "$(json_escape "${api_url:-}")"
+    printf '  "uiUrls": ['
+    local first=1 u
+    if [ -n "$fe" ]; then
+      while IFS= read -r u; do
+        [ -n "$u" ] || continue
+        [ "$first" -eq 1 ] || printf ', '
+        first=0
+        printf '"%s"' "$(json_escape "$u")"
+      done < <(ui_urls "$fe")
+    fi
+    printf '],\n'
+    printf '  "systemdInstalled": "%s",\n' "$(json_escape "$systemd_installed")"
+    printf '  "systemdEnabled": "%s",\n' "$(json_escape "$systemd_enabled")"
+    printf '  "logs": {\n'
+    printf '    "supervisor": "%s",\n' "$(json_escape "$SUPERVISOR_LOG")"
+    printf '    "frontend": "%s",\n' "$(json_escape "$FRONTEND_LOG")"
+    printf '    "backend": "%s",\n' "$(json_escape "$BACKEND_LOG")"
+    printf '    "tunnel": "%s"\n' "$(json_escape "$TUNNEL_LOG")"
+    printf '  }\n'
+    printf '}\n'
+    return 0
+  fi
+
+  out ""
+  out "${C_BOLD}Pagez status${C_RESET}"
+  out "  manager:        $manager"
+  out "  state:          $state"
+  out "  mode:           $smode"
+  out "  uptime:         $uptime"
+  out "  repo root:      $REPO_ROOT"
+  out "  runtime dir:    $RUNTIME_DIR"
+  out "  bind host:      $sbind"
+  out ""
+
+  if [ "$state" = "running" ]; then
+    out "${C_BOLD}Processes${C_RESET}"
+    out "  supervisor:     ${spid:-n/a}"
+    out "  frontend:       ${fpid:-n/a}  (health: $fe_health)"
+    out "  backend:        ${bpid:-n/a}  (health: $be_health)"
+    [ -n "$tpid" ] && out "  tunnel:         $tpid"
+    out ""
+  fi
+
+  if [ -n "$fe" ]; then
+    out "${C_BOLD}Web UI${C_RESET}"
+    while IFS= read -r u; do
+      [ -n "$u" ] || continue
+      out "  $u"
+    done < <(ui_urls "$fe")
+    out ""
+    out "${C_BOLD}API${C_RESET}"
+    out "  http://$spub:$be"
+    out "  http://127.0.0.1:$be"
+    [ -n "$net_host" ] && out "  http://$net_host:$be"
+    out ""
+  else
+    out "${C_BOLD}Web UI${C_RESET}"
+    out "  not allocated (run: $SCRIPT_NAME start)"
+    out ""
+  fi
+
+  out "${C_BOLD}Systemd${C_RESET}"
+  out "  unit installed: $systemd_installed"
+  out "  unit enabled:   $systemd_enabled"
+  out ""
+  out "${C_BOLD}Logs${C_RESET}"
+  out "  supervisor: $SUPERVISOR_LOG"
+  out "  frontend:   $FRONTEND_LOG"
+  out "  backend:    $BACKEND_LOG"
+  out "  tunnel:     $TUNNEL_LOG"
+  out ""
+
+  if [ "$state" = "running" ] && [ "$fe_health" = "down" ]; then
+    log_warn "frontend is not answering; inspect: $SCRIPT_NAME logs --service frontend"
+    return 1
+  fi
+
+  if [ "$state" = "running" ] && [ "$be_health" = "down" ]; then
+    log_warn "backend is not answering; inspect: $SCRIPT_NAME logs --service backend"
+    return 1
+  fi
+
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Section: logs
+# ---------------------------------------------------------------------------
+
+cmd_logs() {
+  local service="all"
+  local follow=1
+  local lines=80
+  local since=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --service|-s) shift; [ $# -gt 0 ] || die_usage "--service requires all|supervisor|frontend|backend|tunnel"; service="$1" ;;
+      --service=*) service="${1#*=}" ;;
+      --no-follow|--tail-only) follow=0 ;;
+      -f|--follow) follow=1 ;;
+      -n|--lines) shift; [ $# -gt 0 ] || die_usage "--lines requires a number"; lines="$1" ;;
+      --since) shift; [ $# -gt 0 ] || die_usage "--since requires a time expression"; since="$1" ;;
+      -h|--help) cmd_help; exit 0 ;;
+      all|supervisor|frontend|backend|tunnel) service="$1" ;;
+      *) die_usage "unknown logs option: $1" ;;
+    esac
+    shift
+  done
+
+  case "$service" in
+    all|supervisor|frontend|backend|tunnel) ;;
+    *) die_usage "--service must be all|supervisor|frontend|backend|tunnel" ;;
+  esac
+
+  case "$lines" in
+    ''|*[!0-9]*) die_usage "--lines must be a number" ;;
+  esac
+
+  local -a files=()
+  case "$service" in
+    all) files=("$SUPERVISOR_LOG" "$FRONTEND_LOG" "$BACKEND_LOG" "$TUNNEL_LOG") ;;
+    supervisor) files=("$SUPERVISOR_LOG") ;;
+    frontend) files=("$FRONTEND_LOG") ;;
+    backend) files=("$BACKEND_LOG") ;;
+    tunnel) files=("$TUNNEL_LOG") ;;
+  esac
+
+  if [ -n "$since" ] && systemd_unit_active; then
+    log_info "using journalctl for --since because the service is systemd-managed"
+    if [ "$follow" -eq 1 ]; then
+      exec journalctl --user -u "$UNIT_NAME" --since "$since" -f
+    fi
+    exec journalctl --user -u "$UNIT_NAME" --since "$since" --no-pager
+  fi
+
+  [ -n "$since" ] && log_warn "--since is only honored under systemd management; falling back to --lines"
+
+  local present=0 f
+  for f in "${files[@]}"; do
+    [ -f "$f" ] && present=1
+  done
+
+  if [ "$present" -eq 0 ]; then
+    log_warn "no log files found yet under $LOG_DIR"
+    return 0
+  fi
+
+  if [ "$follow" -eq 1 ]; then
+    exec tail -n "$lines" -F "${files[@]}"
+  fi
+
+  tail -n "$lines" "${files[@]}"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Section: systemd unit generation
+# ---------------------------------------------------------------------------
+
+generate_unit_contents() {
+  local node_dir pnpm_dir path_value
+
+  node_dir="$(dirname "$NODE_BIN")"
+  pnpm_dir="$(dirname "$PNPM_BIN")"
+
+  path_value="$node_dir:$pnpm_dir:/usr/local/bin:/usr/bin:/bin"
+
+  cat <<UNIT_EOF
+[Unit]
+Description=Pagez dynamic-port supervisor (frontend + backend)
+Documentation=file://$REPO_ROOT/docs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$REPO_ROOT
+ExecStart=$SELF_PATH $SUPERVISOR_ARG
+Environment=PATH=$path_value
+Environment=PAGEZ_MODE=$MODE
+Environment=PAGEZ_HOST=$HOST_BIND
+Environment=PAGEZ_PUBLIC_HOST=$PUBLIC_HOST
+Environment=PAGEZ_RUNTIME_DIR=$RUNTIME_DIR
+Environment=PAGEZ_START_TIMEOUT=$START_TIMEOUT
+Environment=PAGEZ_STOP_TIMEOUT=$STOP_TIMEOUT
+Environment=PAGEZ_ALLOC_RETRIES=$ALLOC_RETRIES
+Environment=PAGEZ_BYPASS_MPS_ADMIT=$BYPASS_MPS_ADMIT
+Environment=NEXT_TELEMETRY_DISABLED=1
+Environment=NODE_ENV=$([ "$MODE" = "prod" ] && printf 'production' || printf 'development')
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=$START_TIMEOUT
+TimeoutStopSec=$((STOP_TIMEOUT + 10))
+KillMode=control-group
+KillSignal=SIGTERM
+SendSIGKILL=yes
+UMask=0027
+NoNewPrivileges=yes
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pagez
+
+[Install]
+WantedBy=default.target
+UNIT_EOF
+}
+
+cmd_enable() {
+  local remove_unit=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --remove-unit) remove_unit=1 ;;
+      -h|--help) cmd_help; exit 0 ;;
+      *) die_usage "unknown enable option: $1" ;;
+    esac
+    shift
+  done
+
+  systemd_available || die "systemd user session is not available; use '$SCRIPT_NAME start' for supervisor mode"
+
+  setup_toolchain
+  ensure_dirs || die "unable to create runtime directory $RUNTIME_DIR"
+
+  mkdir -p "$UNIT_DIR_DEFAULT" || die "unable to create $UNIT_DIR_DEFAULT"
+
+  local unit_path="$UNIT_DIR_DEFAULT/$UNIT_NAME"
+  local tmp="$unit_path.tmp.$$"
+
+  generate_unit_contents > "$tmp"
+  mv -f "$tmp" "$unit_path"
+
+  log_ok "wrote $unit_path"
+
+  systemctl --user daemon-reload || die "systemctl --user daemon-reload failed"
+
+  if ! systemd_unit_enabled; then
+    systemctl --user enable "$UNIT_NAME" || die "systemctl --user enable failed"
+    log_ok "enabled $UNIT_NAME"
+  else
+    log_info "$UNIT_NAME already enabled"
+  fi
+
+  if loginctl show-user "$USER" 2>/dev/null | grep -q '^Linger=no$'; then
+    log_warn "Linger is disabled; Pagez will stop when you log out"
+    log_warn "enable persistence with: sudo loginctl enable-linger $USER"
+  else
+    log_info "Linger state is acceptable for autostart"
+  fi
+
+  if systemd_unit_active; then
+    log_info "restarting active service to apply new unit"
+    systemctl --user restart "$UNIT_NAME" || die "systemctl --user restart failed"
+  else
+    systemctl --user start "$UNIT_NAME" || {
+      log_error "systemctl --user start failed"
+      out ""
+      out "Recent journal:"
+      journalctl --user -u "$UNIT_NAME" -n 40 --no-pager 2>/dev/null || true
+      return 1
+    }
+  fi
+
+  local deadline=$(( $(date +%s) + START_TIMEOUT ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if load_state && frontend_ready "$STATE_FRONTEND_PORT" && backend_ready "$STATE_BACKEND_PORT"; then
+      break
+    fi
+    sleep 2
+  done
+
+  if ! load_state; then
+    log_error "service started but published no port state"
+    journalctl --user -u "$UNIT_NAME" -n 40 --no-pager 2>/dev/null || true
+    return 1
+  fi
+
+  log_ok "Pagez enabled and running under systemd"
+  print_started_banner "$STATE_FRONTEND_PORT" "$STATE_BACKEND_PORT"
+  out "  unit:    $unit_path"
+  out "  journal: journalctl --user -u $UNIT_NAME -f"
+  out ""
+
+  if [ "$remove_unit" = "1" ]; then
+    log_info "--remove-unit is not applicable to enable; ignored"
+  fi
+
+  return 0
+}
+
+cmd_disable() {
+  local remove_unit=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --remove-unit) remove_unit=1 ;;
+      -h|--help) cmd_help; exit 0 ;;
+      *) die_usage "unknown disable option: $1" ;;
+    esac
+    shift
+  done
+
+  if ! systemd_available; then
+    log_warn "systemd user session is not available"
+    rm -f "$UNIT_DIR_DEFAULT/$UNIT_NAME" 2>/dev/null || true
+    return 0
+  fi
+
+  if systemd_unit_active; then
+    log_info "stopping $UNIT_NAME"
+    systemctl --user stop "$UNIT_NAME" || log_warn "stop reported failure; continuing"
+  fi
+
+  if systemd_unit_enabled; then
+    systemctl --user disable "$UNIT_NAME" || log_warn "disable reported failure"
+    log_ok "disabled $UNIT_NAME"
+  else
+    log_info "$UNIT_NAME is not enabled"
+  fi
+
+  clear_state
+
+  if [ "$remove_unit" = "1" ]; then
+    rm -f "$UNIT_DIR_DEFAULT/$UNIT_NAME" 2>/dev/null || true
+    systemctl --user daemon-reload || true
+    log_ok "removed unit file"
+  else
+    log_info "unit file retained at $UNIT_DIR_DEFAULT/$UNIT_NAME (use --remove-unit to delete)"
+  fi
+
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Section: doctor
+# ---------------------------------------------------------------------------
+
+DOCTOR_FAIL=0
+DOCTOR_WARN=0
+
+check_pass() { log_ok "$@"; }
+check_fail() { log_error "$@"; DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); }
+check_note() { log_warn "$@"; DOCTOR_WARN=$((DOCTOR_WARN + 1)); }
+
+cmd_doctor() {
+  out ""
+  out "${C_BOLD}Pagez doctor${C_RESET}"
+  out ""
+
+  out "${C_BOLD}Platform${C_RESET}"
+  out "  kernel:    $(uname -sr)"
+  [ -n "${WSL_DISTRO_NAME:-}" ] && out "  wsl distro: $WSL_DISTRO_NAME"
+  out "  bash:      $BASH_VERSION"
+  out "  repo root: $REPO_ROOT"
+  out "  script:    $SELF_PATH"
+  out ""
+
+  out "${C_BOLD}Repository${C_RESET}"
+  if [ -f "$REPO_ROOT/package.json" ] && [ -f "$REPO_ROOT/pnpm-workspace.yaml" ]; then
+    check_pass "monorepo root detected"
+  else
+    check_fail "pnpm workspace root not found at $REPO_ROOT"
+  fi
+  [ -d "$REPO_ROOT/frontend" ] && check_pass "frontend workspace present" || check_fail "frontend workspace missing"
+  [ -d "$REPO_ROOT/backend" ] && check_pass "backend workspace present" || check_fail "backend workspace missing"
+  [ -d "$REPO_ROOT/node_modules" ] && check_pass "node_modules installed" || check_note "node_modules missing; run pnpm install"
+  out ""
+
+  out "${C_BOLD}Toolchain${C_RESET}"
+  if resolve_node_bin >/dev/null 2>&1; then
+    NODE_BIN="$(resolve_node_bin)"
+    check_pass "node real binary: $NODE_BIN ($("$NODE_BIN" -v 2>/dev/null))"
+    local path_node
+    path_node="$(type -P node 2>/dev/null || printf 'NOT_FOUND')"
+    if [ "$path_node" != "$NODE_BIN" ]; then
+      check_note "PATH node ($path_node) differs from real interpreter; wrapper will be bypassed"
+    fi
+  else
+    check_fail "node could not be resolved as a real executable"
+  fi
+
+  if resolve_pnpm_bin >/dev/null 2>&1; then
+    PNPM_BIN="$(resolve_pnpm_bin)"
+    check_pass "pnpm: $PNPM_BIN ($("$PNPM_BIN" -v 2>/dev/null))"
+  else
+    check_fail "pnpm could not be resolved"
+  fi
+
+  local node_major
+  node_major="$("$NODE_BIN" -p 'process.versions.node.split(".")[0]' 2>/dev/null || printf '0')"
+  if [ "$node_major" -ge 22 ] 2>/dev/null; then
+    check_pass "node major version $node_major satisfies >=22"
+  else
+    check_fail "node major version $node_major does not satisfy >=22"
+  fi
+  out ""
+
+  out "${C_BOLD}Runtime state${C_RESET}"
+  if [ -w "$REPO_ROOT" ]; then
+    check_pass "repo root writable"
+  else
+    check_fail "repo root not writable"
+  fi
+  if assert_runtime_ignored; then
+    check_pass "$RUNTIME_DIR is Git-ignored"
+  else
+    check_fail "$RUNTIME_DIR is NOT Git-ignored; add .pagez/ to .gitignore"
+  fi
+  if [ -d "$RUNTIME_DIR" ]; then
+    out "  runtime dir exists: $RUNTIME_DIR"
+    [ -f "$PORTS_FILE" ] && out "  ports file: $PORTS_FILE"
+    [ -d "$LOCK_DIR" ] && out "  lock present: $LOCK_DIR (owner $(cat "$LOCK_DIR/pid" 2>/dev/null || printf '?'))"
+  else
+    out "  runtime dir not created yet (created on first start)"
+  fi
+  out ""
+
+  out "${C_BOLD}Port allocation${C_RESET}"
+  if [ -n "${NODE_BIN:-}" ]; then
+    local p1 p2
+    p1="$(allocate_free_port "$HOST_BIND" 2>/dev/null || printf '')"
+    p2="$(allocate_free_port "$HOST_BIND" 2>/dev/null || printf '')"
+    if [ -n "$p1" ] && [ -n "$p2" ] && [ "$p1" != "$p2" ]; then
+      check_pass "dynamic allocation works (sampled $p1, $p2)"
+    else
+      check_fail "dynamic allocation failed (p1='${p1:-none}' p2='${p2:-none}')"
+    fi
+    [ -r /proc/sys/net/ipv4/ip_local_port_range ] && \
+      out "  ephemeral range: $(cat /proc/sys/net/ipv4/ip_local_port_range)"
+  else
+    check_fail "cannot test allocation without node"
+  fi
+  out ""
+
+  out "${C_BOLD}Supervision${C_RESET}"
+  have setsid && check_pass "setsid available" || check_note "setsid missing; will fall back to nohup"
+  [ "$PROCFS_AVAILABLE" -eq 1 ] && check_pass "/proc readable (process-tree teardown)" || check_note "/proc unavailable; will use process-group teardown"
+  have ps && check_pass "ps available" || check_fail "ps missing; cannot resolve process groups"
+  out ""
+
+  out "${C_BOLD}systemd${C_RESET}"
+  if systemd_available; then
+    check_pass "systemd user session available"
+    if systemd_unit_installed; then
+      check_note "$UNIT_NAME unit file present"
+    else
+      out "  $UNIT_NAME not installed (run: $SCRIPT_NAME enable)"
+    fi
+    local linger
+    linger="$(loginctl show-user "$USER" 2>/dev/null | sed -n 's/^Linger=//p')"
+    case "$linger" in
+      yes) check_pass "Linger=yes (autostart survives logout)" ;;
+      no)  check_note "Linger=no (autostart stops at logout); fix: sudo loginctl enable-linger $USER" ;;
+      *)   check_note "Linger state unknown" ;;
+    esac
+    local failed
+    failed="$(systemctl --user --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | tr '\n' ' ')"
+    [ -n "${failed// /}" ] && check_note "unrelated failed user units: $failed"
+  else
+    check_note "systemd user session unavailable; enable/disable will degrade to supervisor mode"
+  fi
+  out ""
+
+  out "${C_BOLD}Optional${C_RESET}"
+  have cloudflared && check_pass "cloudflared available for tunnel" || out "  cloudflared missing (tunnel disabled)"
+  local opener_found=0 o
+  for o in wslview sensible-browser xdg-open open; do
+    have "$o" && { opener_found=1; break; }
+  done
+  [ "$opener_found" -eq 1 ] && check_pass "browser opener available ($o)" || out "  no browser opener; URLs must be opened manually"
+  out ""
+
+  out "${C_BOLD}Current listeners (informational)${C_RESET}"
+  if have ss; then
+    ss -ltn 2>/dev/null | awk 'NR>1 {n=split($4,a,":"); print a[n]}' | sort -un | tr '\n' ' '
+    out ""
+  else
+    out "  ss unavailable"
+  fi
+  out ""
+
+  if [ "$DOCTOR_FAIL" -gt 0 ]; then
+    log_error "doctor finished with $DOCTOR_FAIL failure(s) and $DOCTOR_WARN warning(s)"
+    return 3
+  fi
+
+  if [ "$DOCTOR_WARN" -gt 0 ]; then
+    log_warn "doctor finished clean with $DOCTOR_WARN warning(s)"
+    return 0
+  fi
+
+  log_ok "doctor finished clean"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Section: tunnel
+# ---------------------------------------------------------------------------
+
+tunnel_running() {
+  local pid
+  pid="$(read_pid_file "$TUNNEL_PID_FILE" 2>/dev/null || true)"
+  [ -n "$pid" ] && pid_alive "$pid"
+}
+
+tunnel_url() {
+  [ -f "$TUNNEL_LOG" ] || return 1
+  grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' "$TUNNEL_LOG" 2>/dev/null | tail -n 1
+}
+
+cmd_tunnel() {
+  local action="${1:-status}"
+  shift || true
+
+  case "$action" in
+    start)
+      have cloudflared || die "cloudflared is not installed; install it or use a reverse proxy"
+      load_state || die "no running Pagez port state; run '$SCRIPT_NAME start' first"
+      tunnel_running && { log_info "tunnel already running"; out "  $(tunnel_url || printf 'url not yet published')"; return 0; }
+
+      : > "$TUNNEL_LOG"
+      (
+        cd "$REPO_ROOT" || exit 1
+        exec cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:${STATE_FRONTEND_PORT}"
+      ) >> "$TUNNEL_LOG" 2>&1 < /dev/null &
+      printf '%s\n' "$!" > "$TUNNEL_LOG.pid.tmp" && mv -f "$TUNNEL_LOG.pid.tmp" "$TUNNEL_PID_FILE"
+
+      local deadline=$(( $(date +%s) + 25 )) url=""
+      while [ "$(date +%s)" -lt "$deadline" ]; do
+        url="$(tunnel_url || true)"
+        [ -n "$url" ] && break
+        sleep 1
+      done
+
+      if [ -z "$url" ]; then
+        log_error "tunnel did not publish a URL within 25s"
+        tail -n 20 "$TUNNEL_LOG" 2>/dev/null || true
+        return 1
+      fi
+
+      log_ok "tunnel active"
+      out "  public:  $url"
+      out "  targets: http://127.0.0.1:${STATE_FRONTEND_PORT} (dynamic)"
+      out "  stop:    $SCRIPT_NAME tunnel stop"
+      return 0
+      ;;
+    stop)
+      tunnel_running || { log_info "tunnel not running"; return 0; }
+      terminate_recorded_process tunnel "$(read_pid_file "$TUNNEL_PID_FILE")"
+      log_ok "tunnel stopped"
+      return 0
+      ;;
+    status)
+      if tunnel_running; then
+        out "  tunnel: running (pid $(read_pid_file "$TUNNEL_PID_FILE"))"
+        out "  url:    $(tunnel_url || printf 'not published yet')"
+      else
+        out "  tunnel: stopped"
+      fi
+      return 0
+      ;;
+    restart)
+      cmd_tunnel stop || true
+      cmd_tunnel start
+      ;;
+    *)
+      die_usage "tunnel action must be start|stop|restart|status"
+      ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# Section: install / uninstall
+# ---------------------------------------------------------------------------
+
+cmd_install() {
+  mkdir -p "$USER_BIN_DIR" || die "unable to create $USER_BIN_DIR"
+  chmod +x "$SELF_PATH" 2>/dev/null || die "unable to mark $SELF_PATH executable"
+
+  if [ -L "$USER_BIN_LINK" ] || [ -e "$USER_BIN_LINK" ]; then
+    local existing
+    existing="$(readlink -f "$USER_BIN_LINK" 2>/dev/null || printf '%s' "$USER_BIN_LINK")"
+    if [ "$existing" = "$(readlink -f "$SELF_PATH" 2>/dev/null || printf '%s' "$SELF_PATH")" ]; then
+      log_info "$USER_BIN_LINK already points at this script"
+    else
+      die "$USER_BIN_LINK exists and points elsewhere ($existing); remove it manually first"
+    fi
+  else
+    ln -s "$SELF_PATH" "$USER_BIN_LINK"
+    log_ok "installed $USER_BIN_LINK -> $SELF_PATH"
+  fi
+
+  case ":$PATH:" in
+    *":$USER_BIN_DIR:"*)
+      log_ok "$USER_BIN_DIR is on PATH"
+      ;;
+    *)
+      log_warn "$USER_BIN_DIR is NOT on PATH"
+      out "  add this to your shell profile:"
+      out "    export PATH=\"\$HOME/.local/bin:\$PATH\""
+      ;;
+  esac
+
+  out ""
+  out "  verify: command -v $SCRIPT_NAME"
+  out "  usage:  $SCRIPT_NAME doctor"
+  out "          $SCRIPT_NAME start"
+  out ""
+  return 0
+}
+
+cmd_uninstall() {
+  if [ -L "$USER_BIN_LINK" ]; then
+    local existing
+    existing="$(readlink -f "$USER_BIN_LINK" 2>/dev/null || true)"
+    if [ "$existing" = "$(readlink -f "$SELF_PATH" 2>/dev/null || true)" ]; then
+      rm -f "$USER_BIN_LINK"
+      log_ok "removed $USER_BIN_LINK"
+    else
+      die "$USER_BIN_LINK points elsewhere ($existing); not removing"
+    fi
+  else
+    log_info "$USER_BIN_LINK not present"
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Section: help
+# ---------------------------------------------------------------------------
+
+cmd_help() {
+  cat <<HELP_EOF
+Usage: $SCRIPT_NAME <subcommand> [options]
+
+Pagez local operations entrypoint with dynamic free-port allocation.
+
+Subcommands:
+  start [--dev|--prod] [--no-wait] [--open] [--timeout N]
+                                 Allocate free ports, launch frontend and
+                                 backend in the background, verify health,
+                                 and print the web UI URL.
+  stop [--force] [--quiet]        Terminate the supervised process tree,
+                                 remove port state, preserve logs.
+                                 --force also sweeps orphaned Pagez processes.
+  restart [start options]         stop then start with fresh ports.
+  status [--json]                 Manager, state, mode, uptime, PIDs, ports,
+                                 health, and the openable web UI URL.
+  logs [--service NAME] [-n N] [--no-follow] [--since EXPR]
+                                 Read runtime logs. NAME is one of
+                                 all|supervisor|frontend|backend|tunnel.
+  enable [--remove-unit]          Generate, enable, and start the systemd
+                                 user service for autostart.
+  disable [--remove-unit]         Stop and disable the systemd user service.
+  doctor                          Validate platform, toolchain, port
+                                 allocation, supervision, and systemd.
+  tunnel [start|stop|restart|status]
+                                 Cloudflare quick tunnel against the dynamic
+                                 frontend port.
+  install                         Symlink this script to ~/.local/bin/pagez.
+  uninstall                       Remove that symlink if it points here.
+  help                            This message.
+
+Design guarantees:
+  * No fixed ports are ever assigned. Ports come from the kernel via port 0.
+  * Allocation is followed by verification and retried if verification fails.
+  * Only processes recorded under .pagez/pids and verified through
+    /proc/<pid>/cmdline against the repository root are ever signalled.
+  * Services bind 0.0.0.0 so WSL2 localhost forwarding and Docker port
+    publishing both work.
+  * All runtime state lives under the Git-ignored .pagez/ directory.
+
+Environment overrides:
+  PAGEZ_MODE                 dev|prod                     (default dev)
+  PAGEZ_HOST                 bind address                 (default 0.0.0.0)
+  PAGEZ_PUBLIC_HOST          host used in printed URLs    (default localhost)
+  PAGEZ_NETWORK_HOST         explicit LAN host for URLs
+  PAGEZ_RUNTIME_DIR          runtime dir                  (default <repo>/.pagez)
+  PAGEZ_START_TIMEOUT        seconds to healthy           (default dev 120, prod 60)
+  PAGEZ_STOP_TIMEOUT         seconds before SIGKILL       (default 15)
+  PAGEZ_ALLOC_RETRIES        allocation attempts          (default 5)
+  PAGEZ_FRONTEND_PORT        force a port (opt-in only)
+  PAGEZ_BACKEND_PORT         force a port (opt-in only)
+  PAGEZ_SKIP_BUILD           1 skips prod builds
+  PAGEZ_BYPASS_MPS_ADMIT     0 restores a node wrapper
+  PAGEZ_NO_COLOR             1 disables color
+  PAGEZ_HYPERLINKS           1 emits OSC 8 links
+  PAGEZ_BACKEND_HEALTH_PATH  optional HTTP readiness path
+
+Exit codes:
+  0 success   1 operational failure   2 usage error   3 doctor failure
+HELP_EOF
+}
+
+# ---------------------------------------------------------------------------
+# Section: dispatch
+# ---------------------------------------------------------------------------
 
 main() {
-  if [[ $# -lt 1 ]]; then
+  if [ $# -lt 1 ]; then
     cmd_help
     exit 0
   fi
 
-  local cmd="$1"; shift
+  local cmd="$1"
+  shift
+
   case "$cmd" in
-    help|--help|-h)
-      cmd_help
-      ;;
-    doctor)
-      cmd_doctor "$@"
-      ;;
-    start)
-      cmd_start "$@"
-      ;;
-    stop)
-      cmd_stop "$@"
-      ;;
-    restart)
-      cmd_restart "$@"
-      ;;
-    status)
-      cmd_status "$@"
-      ;;
-    logs)
-      cmd_logs "$@"
-      ;;
-    enable)
-      cmd_enable "$@"
-      ;;
-    disable)
-      cmd_disable "$@"
-      ;;
-    tunnel)
-      cmd_tunnel "$@"
-      ;;
-    *)
-      echo "${SCRIPT_NAME}: unknown subcommand: ${cmd}" >&2
-      echo "Run '${SCRIPT_NAME} help' for usage." >&2
-      exit 2
-      ;;
+    help|--help|-h)   cmd_help ;;
+    start)            cmd_start "$@" ;;
+    stop)             cmd_stop "$@" ;;
+    restart)          cmd_restart "$@" ;;
+    status)           cmd_status "$@" ;;
+    logs)             cmd_logs "$@" ;;
+    enable)           cmd_enable "$@" ;;
+    disable)          cmd_disable "$@" ;;
+    doctor)           cmd_doctor "$@" ;;
+    tunnel)           cmd_tunnel "$@" ;;
+    install)          cmd_install "$@" ;;
+    uninstall)        cmd_uninstall "$@" ;;
+    "$SUPERVISOR_ARG") cmd_run "$@" ;;
+    *)                die_usage "unknown subcommand: $cmd" ;;
   esac
 }
 

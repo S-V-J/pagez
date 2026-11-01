@@ -586,6 +586,17 @@ pid_alive() {
   kill -0 "$1" 2>/dev/null
 }
 
+# Returns success when the process exists only as a zombie awaiting reaping.
+# Zombies respond to kill -0 but cannot be signalled usefully and often have
+# an empty /proc/<pid>/cmdline, so ownership checks must special-case them.
+pid_zombie() {
+  local pid="$1" state
+  [ -n "$pid" ] || return 1
+  [ -r "/proc/$pid/stat" ] || return 1
+  state="$(awk -F') ' '{print $2}' "/proc/$pid/stat" 2>/dev/null | cut -d' ' -f1 || true)"
+  [ "$state" = "Z" ]
+}
+
 pid_cmdline() {
   local pid="$1"
   [ -r "/proc/$pid/cmdline" ] || return 1
@@ -698,8 +709,14 @@ terminate_recorded_process() {
     return 0
   fi
 
+  if pid_zombie "$pid"; then
+    rm -f "$PID_DIR/$name.pid"
+    return 0
+  fi
+
   if ! pid_is_ours "$pid"; then
-    log_warn "$name PID $pid is alive but is not a Pagez process; refusing to signal it"
+    log_warn "$name PID $pid is alive but is not a recognized Pagez process; discarding stale record"
+    rm -f "$PID_DIR/$name.pid"
     return 0
   fi
 
@@ -816,8 +833,13 @@ load_state() {
   return 0
 }
 
+clear_pids() {
+  rm -f "$SUPERVISOR_PID_FILE" "$FRONTEND_PID_FILE" "$BACKEND_PID_FILE" "$TUNNEL_PID_FILE" 2>/dev/null || true
+}
+
 clear_state() {
   rm -f "$PORTS_FILE" "$PORTS_FILE".tmp.* 2>/dev/null || true
+  clear_pids
 }
 
 # ---------------------------------------------------------------------------
@@ -1519,7 +1541,9 @@ cmd_status() {
   resolve_probe_node || true
 
   local manager state spid fpid bpid tpid
-  manager="$(current_manager || printf 'none')"
+  manager="$(current_manager || true)"
+  manager="${manager%%$'\n'*}"
+  [ -n "$manager" ] || manager="none"
 
   if [ "$manager" = "none" ]; then
     state="stopped"
